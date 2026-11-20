@@ -613,6 +613,12 @@ pub(crate) fn analyze_text(
         }
     }
 
+    // raea: no break after a solidus that a letter or digit follows, as Chrome lays text out (ICU's rules as Blink
+    // tailors them): "https://bloombox.shop/spring" and "and/or" stay whole, where UAX #14 alone breaks after "/"
+    line_boundary_positions.retain(|&p| {
+        !(text[..p].ends_with('/') && text[p..].chars().next().is_some_and(char::is_alphanumeric))
+    });
+
     // Collect boundary byte positions compactly
     let mut wb_iter = data_sources.word_segmenter().segment_str(text).peekable();
     let mut gb_iter = data_sources
