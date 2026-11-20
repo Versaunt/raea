@@ -77,6 +77,29 @@ fn media_file(url: &str) -> Option<std::path::PathBuf> {
     })
 }
 
+/// The latest change to a composition folder's code (.ts, .tsx, .js, .jsx, .css under it), in seconds since the epoch.
+fn newest_code(dir: &std::path::Path) -> f64 {
+    fn walk(d: &std::path::Path, best: &mut f64) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            let name = e.file_name();
+            if name.to_string_lossy().starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            if p.is_dir() {
+                walk(&p, best);
+            } else if p.extension().is_some_and(|x| ["ts", "tsx", "js", "jsx", "css"].iter().any(|k| x == *k)) {
+                if let Some(t) = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+                    *best = best.max(t.as_secs_f64());
+                }
+            }
+        }
+    }
+    let mut best = 0.0;
+    walk(dir, &mut best);
+    best
+}
+
 fn font_bytes(url: &str) -> Result<Vec<u8>, String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         return raea_io_net::cache::read(url);
@@ -247,6 +270,20 @@ pub fn call(name: &str, v: &Value) -> R<Value> {
                 };
                 Ok(json!({ "width": w, "height": h, "url": url }))
             }
+            // the composition's folder, and where one of its media paths (staticFile's /media/..., a path) is: the
+            // @remotion/three compat finds a 3D layer captured in Chrome by them (sdk/raea/src/remotion/three.ts)
+            // (`newest`: the latest change to its code, seconds since the epoch, so a layer older than the ad is refused)
+            "composition.dir" => {
+                let dir = RENDER_DIR.lock().unwrap().clone().or_else(composition_dir);
+                let newest = dir.as_deref().map(newest_code);
+                Ok(json!({ "dir": dir.map(|d| d.display().to_string()), "newest": newest }))
+            }
+            "media.find" => {
+                let src = s(v, "src")?;
+                let file = media_file(&src).filter(|f| f.is_file());
+                let mtime = file.as_deref().and_then(|f| f.metadata().ok()?.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+                Ok(json!({ "path": file.map(|f| f.display().to_string()), "mtime": mtime }))
+            }
             "fonts.face" => {
                 let (family, url) = (s(v, "family")?, s(v, "url")?);
                 let bytes = font_bytes(&url)?;
@@ -296,6 +333,8 @@ pub fn register() {
             ("canvas.read", "{ width: number; height: number; __canvas2d: unknown; x: number; y: number; w: number; h: number }", "{ data: string }", "an off-page canvas's display list drawn and a rectangle of it read back as base64 RGBA (getImageData)"),
             ("canvas.advances", "{ font: unknown; text: string }", "unknown", "each character's advance in a font as the page's faces draw it (a canvas's measureText)"),
             ("fonts.face", "{ family: string; url: string; weight?: string; style?: string }", "{ family: string }", "a font face for the page from a URL (staticFile's /media/..., a path, http(s) through raea's URL cache, a data: URL), as an @font-face rule gives one (Remotion's loadFont; WOFF2, WOFF, TTF, OTF)"),
+            ("composition.dir", "{}", "{ dir: string | null; newest: number | null }", "the folder of the composition being rendered, and the latest change to its code (seconds since the epoch)"),
+            ("media.find", "{ src: string }", "{ path: string | null; mtime: number | null }", "where a composition's media path (staticFile's /media/..., a path) is and when it last changed, null when there's no such file"),
             ("image.read", "{ src: string }", "{ width: number; height: number; url: string }", "an image file's natural size and where drawImage reads it (a file:// path for a composition's file; http(s) and data: as given): a composition's off-page new Image()"),
             ("fonts.atlases", "{ font: string; size: number; text: string }", "{ width: number; height: number; src: string }[]", "bevy_text's glyph atlases for a text in a font file at a size px, each page a PNG data: URL, as Bevy's FontAtlasSet holds them"),
             ("media.live", "{}", "{ vdecs: number; vencs: number; adecs: number; frames: number; solids: number; worlds: number }", "how many native coders, frames, solids and worlds are alive (for leak checks)"),

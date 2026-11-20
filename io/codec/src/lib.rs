@@ -208,9 +208,12 @@ pub trait Backend {
 }
 
 
-/// The as-of index: the latest pts <= t (or the first frame for t before it). `pts` sorted ascending.
+/// The as-of index: the latest pts <= t (or the first frame for t before it). `pts` sorted ascending. Within a
+/// millisecond counts as at: WebM (and other millisecond time bases) round each frame's time to the ms, so 30 fps
+/// frame 77 is stamped 2567 ms, after its 2566.67, and the frame before it showed (every third frame a frame late).
+/// No two frames are within a ms of each other below 1000 fps, so it never takes the next frame for this one.
 pub fn as_of(pts: &[f64], t: f64) -> usize {
-    let i = pts.partition_point(|p| *p <= t + 1e-6);
+    let i = pts.partition_point(|p| *p <= t + 1e-3);
     i.saturating_sub(1)
 }
 
