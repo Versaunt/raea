@@ -52,6 +52,36 @@ impl Ctx<'_> {
                 });
             }
             Some("text") => self.text(pm, a),
+            // ["pixels", dx, dy, w, h, base64 RGBA (straight alpha), [x0, y0, x1, y1]]: putImageData, the dirty rectangle
+            // of the image written into the bitmap at dx, dy as it is (no transform, alpha, compositing or clip)
+            Some("pixels") => {
+                use base64::Engine as _;
+                let n = |i: usize| a.get(i).and_then(Value::as_f64).unwrap_or(0.0) as i64;
+                let (dx, dy, iw, ih) = (n(1), n(2), n(3), n(4));
+                let Some(bytes) = a.get(5).and_then(Value::as_str).and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()) else { return };
+                let r = a.get(6).and_then(Value::as_array);
+                let d = |i: usize, or: i64| r.and_then(|r| r.get(i)).and_then(Value::as_f64).map_or(or, |v| v as i64);
+                let (x0, y0, x1, y1) = (d(0, 0), d(1, 0), d(2, iw), d(3, ih));
+                if bytes.len() < (iw * ih * 4) as usize {
+                    return;
+                }
+                let px = pm.pixels_mut();
+                for y in y0.max(0)..y1.min(ih) {
+                    let ty = dy + y;
+                    if ty < 0 || ty >= h as i64 {
+                        continue;
+                    }
+                    for x in x0.max(0)..x1.min(iw) {
+                        let tx = dx + x;
+                        if tx < 0 || tx >= w as i64 {
+                            continue;
+                        }
+                        let i = ((y * iw + x) * 4) as usize;
+                        let c = sk::ColorU8::from_rgba(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]).premultiply();
+                        px[(ty * w as i64 + tx) as usize] = c;
+                    }
+                }
+            }
             Some("image") => {
                 let Some(img) = a.get(1).and_then(Value::as_str).and_then(|src| self.decode(src)) else { return };
                 self.image(pm, a, &img)

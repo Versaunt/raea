@@ -443,6 +443,28 @@ export class CanvasRenderingContext2D_ {
   }
   /** The bitmap's pixels in a rectangle: the list drawn on the host, now (the host call canvas.read, answered before it
    *  returns; systems/canvas replays it on the CPU, so nothing is read back from a GPU). */
+  /** putImageData: the rectangle's pixels written into the bitmap as they are (no transform, alpha, compositing,
+   *  shadow or clip, as the spec has it), replayed on the host (systems/canvas "pixels"). One that covers the whole
+   *  bitmap starts the list again, as a whole clear does. */
+  putImageData(img: { data: Uint8ClampedArray; width: number; height: number }, dx: number, dy: number, dirtyX = 0, dirtyY = 0, dirtyW?: number, dirtyH?: number) {
+    [dx, dy] = [Math.trunc(Number(dx)), Math.trunc(Number(dy))];
+    let [x0, y0, x1, y1] = [Math.trunc(dirtyX), Math.trunc(dirtyY), Math.trunc(dirtyX + (dirtyW ?? img.width)), Math.trunc(dirtyY + (dirtyH ?? img.height))];
+    if (x1 < x0) [x0, x1] = [x1, x0];
+    if (y1 < y0) [y0, y1] = [y1, y0];
+    [x0, y0, x1, y1] = [Math.max(0, x0), Math.max(0, y0), Math.min(img.width, x1), Math.min(img.height, y1)];
+    if (x1 <= x0 || y1 <= y0) return;
+    const [w, h] = [this.canvas.width, this.canvas.height];
+    const op = ["pixels", dx, dy, img.width, img.height, base64(new Uint8Array(img.data.buffer, img.data.byteOffset, img.data.byteLength)), [x0, y0, x1, y1]];
+    if (dx + x0 <= 0 && dy + y0 <= 0 && dx + x1 >= w && dy + y1 >= h) {
+      this.list = [];
+      this.gen++;
+      this.size = [w, h];
+      this.list.push(op);
+      this.send();
+      return;
+    }
+    this.push(op);
+  }
   getImageData(sx: number, sy: number, sw: number, sh: number) {
     [sx, sy, sw, sh] = [sx, sy, sw, sh].map((n) => Math.trunc(Number(n)));
     if (!sw || !sh || [sw, sh].some((n) => !Number.isFinite(n))) throw new DOMException(`Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The source ${sw ? "height" : "width"} is 0.`, "IndexSizeError");

@@ -10,7 +10,7 @@
 // `__canvas2d` prop, at the next microtask after a drawing call.
 //
 // getImageData reads the pixels back synchronously (the host call canvas.read, which replays the list on the CPU).
-// Not here (yet): putImageData / toDataURL, createPattern, filter, isPointInPath. measureText uses the advances the host gives for its fonts (`fonts`).
+// Not here (yet): toDataURL, createPattern, filter, isPointInPath. measureText uses the advances the host gives for its fonts (`fonts`).
 export { parseColor, parseFont, CanvasRenderingContext2D_, Path2D_, canvasClass, sniffSize, ImageData_, canvasGlobals } from "./canvas/all";
 
 
