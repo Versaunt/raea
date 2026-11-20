@@ -178,6 +178,10 @@ impl Plugin for EditResolve {
             (true, true) => Ok(None),
             (true, false) => match resolve_from(ctx, spec, &e.dir).await? {
                 Some(r) => Ok(Some(r)),
+                // a project on three before r180, which calls HDRLoader RGBELoader (raea's R3F reader imports HDRLoader)
+                None if spec == "three/examples/jsm/loaders/HDRLoader.js" && e.work.join("motion/remotion/hdr-loader.ts").is_file() => {
+                    Ok(Some(HookResolveIdOutput::from_id(e.work.join("motion/remotion/hdr-loader.ts").to_string_lossy().as_ref())))
+                }
                 None => resolve_from(ctx, spec, &plugins()).await,
             },
             // a package (the edit's or the engine's) importing one the engine carries: the engine's

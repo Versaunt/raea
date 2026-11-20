@@ -1325,6 +1325,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     filter.or_else(|| backdrop_filter.as_ref().map(|_| Arc::new(anyrender::filters::Filter::empty()))),
                     None,
                     |scene| {
+                        // raea: a box the 3D shows in (data-raea-3d-hole: @remotion/three's ThreeCanvas, whose WebGL
+                        // canvas Chrome paints at its place among the page's boxes): what the page drew under it so far
+                        // is cleared, so the 3D raea draws under the whole page shows there, and what comes after it
+                        // in paint order stays over it. (Inside an opacity, filter or blend layer it clears only that
+                        // layer's own drawing.)
+                        if cx.element.attrs.iter().any(|a| &*a.name.local == "data-raea-3d-hole") {
+                            scene.push_layer(Fill::NonZero, peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::Clear), 1.0, cx.transform, &cx.frame.border_box_path(), None, None);
+                            scene.pop_layer();
+                        }
                         // raea: the root's background is the canvas's, which the root's own transform doesn't move
                         // (Chrome; WPT transform-translate-background-002)
                         let own = node.transform().as_deref().copied().filter(|t| is_root_element && t.determinant() != 0.0);

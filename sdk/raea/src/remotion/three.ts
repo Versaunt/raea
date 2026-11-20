@@ -7,6 +7,6 @@ import { R3F } from "@raea/r3f";
 type ThreeCanvasProps = { width: number; height: number; children?: ReactNode; style?: CSSProperties; [k: string]: unknown };
 
 export function ThreeCanvas({ width, height, children, style, gl: _gl, frameloop: _f, dpr: _d, events: _e, ...config }: ThreeCanvasProps) {
-  return createElement("div", { style: { position: "relative", width, height, ...style } }, createElement(R3F as never, config as never, children));
+  return createElement("div", { "data-raea-3d-hole": "", style: { position: "relative", width, height, ...style } }, createElement(R3F as never, config as never, children));
 }
 export { useVideoTexture, useOffthreadVideoTexture } from "./three-video";

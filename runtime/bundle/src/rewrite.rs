@@ -126,7 +126,7 @@ pub fn sources(root: &Path) -> R<Vec<PathBuf>> {
 /// beside it, `up` being the way from its folder to the copy's root (motion/x.ts imports "@raea/app/clock":
 /// "../app/clock"; motion/3d/x.ts, "../../app/clock").
 pub fn point_sdks(src: &str, up: &str, sdks: &[(String, String)]) -> String {
-    let re = regex::Regex::new(r#"(\bfrom\s+)(["'])(@raea/[a-z]+)((?:/[^"']*)?)["']"#).unwrap();
+    let re = regex::Regex::new(r#"(\bfrom\s+)(["'])(@raea/[a-z0-9]+)((?:/[^"']*)?)["']"#).unwrap();
     re.replace_all(src, |c: &regex::Captures| match sdks.iter().find(|(name, _)| *name == &c[3]) {
         Some((_, dir)) => format!("{}\"{up}{}{}\"", &c[1], dir.rsplit('/').nth(1).unwrap_or(dir), &c[4]),
         None => c[0].to_string(),

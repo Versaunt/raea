@@ -1,7 +1,7 @@
 // Remotion's API answered by raea, so a Remotion project renders unchanged: `import ... from "remotion"` resolves here
 // (engine/bundle edit.rs). raea ships the same names for most of it (AbsoluteFill, Sequence, Series, Loop, Freeze, Img,
 // Audio, Video, staticFile, interpolate, spring, Easing, Composition, registerRoot, useCurrentFrame, useVideoConfig);
-// this adds the rest: delayRender and continueRender (raea waits for fonts and media itself), OffthreadVideo and the
+// this adds the rest: delayRender and continueRender (on raea's frame hold), OffthreadVideo and the
 // Html5 names (raea's Video already decodes off the page), random and interpolateColors with Remotion's exact results,
 // Still, Folder, prefetch and the environment calls.
 import { createElement, Fragment, type ReactNode } from "react";
@@ -14,8 +14,22 @@ export { Video as OffthreadVideo, Video as Html5Video, Audio as Html5Audio };
 
 let handles = 0;
 /** raea holds a frame until its fonts and media load, so a delay is a handle and nothing more. */
-export const delayRender = (_label?: string, _opts?: unknown): number => ++handles;
-export const continueRender = (_handle: number): void => {};
+// raea's frame hold (runtime/bundle entry.rs HOLD, the one sdk/r3f's Suspense uses): a frame isn't taken while a
+// handle is open, and the last one let go draws the frame again (an ad that mounts its scene once its fonts load)
+type Hold = { n: number; wake: Set<() => void> };
+const HOLD = ((globalThis as { __raeaHold?: Hold }).__raeaHold ??= { n: 0, wake: new Set() });
+const open = new Set<number>();
+export const delayRender = (_label?: string, _opts?: unknown): number => {
+  const h = ++handles;
+  open.add(h);
+  HOLD.n++;
+  return h;
+};
+export const continueRender = (handle: number): void => {
+  if (!open.delete(handle)) return;
+  HOLD.n = Math.max(0, HOLD.n - 1);
+  if (HOLD.n === 0) for (const w of [...HOLD.wake]) w();
+};
 export const cancelRender = (err: unknown): never => {
   throw err instanceof Error ? err : new Error(String(err));
 };
