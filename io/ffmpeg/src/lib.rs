@@ -11,8 +11,9 @@ use raea_io_codec::{
 
 pub struct Ffmpeg;
 
-/// The facts, the presentation times, and whether the colour matrix is untagged.
-fn probe(path: &Path) -> R<(Info, Vec<f64>, bool)> {
+/// The facts, the presentation times, whether the colour matrix is untagged, and the libvpx decoder a WebM with an
+/// alpha channel needs (its alpha is a side channel ffmpeg's own VP8/VP9 decoders drop: the Gas loops' transparency).
+fn probe(path: &Path) -> R<(Info, Vec<f64>, bool, Option<&'static str>)> {
     let out = Command::new("ffprobe")
         .args([
             "-v",
@@ -20,7 +21,7 @@ fn probe(path: &Path) -> R<(Info, Vec<f64>, bool)> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=codec_name,width,height,r_frame_rate,color_space:stream_side_data=rotation:format=duration",
+            "stream=codec_name,width,height,r_frame_rate,color_space:stream_tags=alpha_mode:stream_side_data=rotation:format=duration",
             "-show_entries",
             "packet=pts_time",
             "-of",
@@ -60,6 +61,13 @@ fn probe(path: &Path) -> R<(Info, Vec<f64>, bool)> {
         .and_then(|d| d.parse().ok())
         .unwrap_or(0.0);
     let untagged = !matches!(s["color_space"].as_str(), Some(c) if c != "unknown");
+    let tags = &s["tags"];
+    let alpha = ["alpha_mode", "ALPHA_MODE"].iter().any(|k| tags[*k].as_str() == Some("1"));
+    let vpx = match (alpha, s["codec_name"].as_str()) {
+        (true, Some("vp9")) => Some("libvpx-vp9"),
+        (true, Some("vp8")) => Some("libvpx"),
+        _ => None,
+    };
     Ok((
         Info {
             codec: s["codec_name"].as_str().unwrap_or("?").into(),
@@ -71,6 +79,7 @@ fn probe(path: &Path) -> R<(Info, Vec<f64>, bool)> {
         },
         pts,
         untagged,
+        vpx,
     ))
 }
 
@@ -82,6 +91,8 @@ struct Decoder {
     /// untagged HD (720 lines or more) is read as BT.709, as Apple, browsers and our own decoders read it (swscale
     /// would assume BT.601)
     bt709: bool,
+    /// the decoder an alpha WebM is read with (probe)
+    vpx: Option<&'static str>,
 }
 
 impl Decoder {
@@ -92,7 +103,11 @@ impl Decoder {
         }
         let start = self.pts[at] - self.pts[0];
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-v", "error", "-ss", &format!("{start:.6}"), "-i"]).arg(&self.path);
+        cmd.args(["-v", "error", "-ss", &format!("{start:.6}")]);
+        if let Some(vpx) = self.vpx {
+            cmd.args(["-c:v", vpx]);
+        }
+        cmd.arg("-i").arg(&self.path);
         if self.bt709 {
             cmd.args(["-vf", "scale=in_color_matrix=bt709:in_range=tv"]);
         }
@@ -103,7 +118,7 @@ impl Decoder {
                 "rawvideo",
                 "-pix_fmt",
                 "rgba",
-                "-vsync",
+                "-fps_mode",
                 "passthrough",
                 "-",
             ])
@@ -240,7 +255,7 @@ impl Backend for Ffmpeg {
         "ffmpeg"
     }
     fn open_video(&self, path: &Path) -> R<Box<dyn VideoDecoder>> {
-        let (info, pts, untagged) = probe(path)?;
+        let (info, pts, untagged, vpx) = probe(path)?;
         let bt709 = untagged && info.width.min(info.height) >= 720;
         if pts.is_empty() {
             return Err(format!("{}: no video frames", path.display()));
@@ -251,6 +266,7 @@ impl Backend for Ffmpeg {
             pts,
             pipe: None,
             bt709,
+            vpx,
         }))
     }
     fn decode_audio(&self, path: &Path) -> R<Audio> {

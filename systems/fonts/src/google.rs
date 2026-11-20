@@ -124,6 +124,11 @@ pub fn add_face(bytes: Vec<u8>, family: &str, weight: &str, style: &str) -> Resu
         w => w.parse::<f32>().ok(),
     };
     let mut faces = FACES.lock().unwrap();
+    // the SVG and canvas faces too (blitz-dom's font database: an inline SVG's <text>, a canvas's fillText and
+    // measureText), as a page's own @font-face faces are
+    if !faces.iter().any(|(_, f, wt, it)| f == family && *wt == weight && *it == (style.trim() == "italic")) {
+        blitz_dom::util::add_svg_font(ttf.clone(), Some(family));
+    }
     if !faces.iter().any(|(b, f, wt, it)| f == family && *wt == weight && *it == (style == "italic") && b.len() == ttf.len()) {
         faces.push((Bytes::from(ttf), family.to_string(), weight, style.trim() == "italic"));
     }
@@ -144,3 +149,6 @@ pub fn load_faces(doc: &mut BaseDocument, from: usize) -> usize {
     }
     faces.len()
 }
+
+/// The SVG and canvas faces (blitz-dom's font database), for a host's off-page canvas calls (canvas.read, advances)
+pub use blitz_dom::util::svg_fonts;

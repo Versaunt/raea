@@ -190,6 +190,22 @@ pub fn bundle_fresh(tsx: &Path, out_js: &Path, o: &CompOpts, portable: Option<&P
             std::fs::write(&p, rewritten).map_err(|e| e.to_string())?;
         }
     }
+    // the edit's own Tailwind 4 entries (`@import "tailwindcss"`) compiled to plain CSS, as its outside ones are
+    {
+        let project = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(&dir).to_path_buf();
+        let mut stack = vec![work.join("src")];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "css") && std::fs::read_to_string(&p).is_ok_and(|t| crate::styles::is_tailwind_entry(&t)) {
+                    let original = dir.join(p.strip_prefix(work.join("src")).unwrap());
+                    std::fs::write(&p, crate::styles::tailwind_sheet(&original, &project)?).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
     let js = raea_io_home::home().join("sdk/react/js");
     link_node_modules(&js, &work)?;
     if o.lite {

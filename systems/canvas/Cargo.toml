@@ -20,4 +20,4 @@ tiny-skia = { version = "=0.12.0", default-features = false, features = ["std", 
 # read's pixels across the wire
 base64 = "0.22"
 # which file of a family split by unicode-range has a glyph (subsets.rs)
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "variable-fonts"] }

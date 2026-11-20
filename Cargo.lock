@@ -14779,6 +14779,7 @@ dependencies = [
  "raea-io-net",
  "raea-native",
  "raea-runtime-plugins",
+ "raea-sys-canvas",
  "raea-sys-fonts",
  "raea-sys-mix",
  "raea-sys-ml",

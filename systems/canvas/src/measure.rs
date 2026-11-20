@@ -43,7 +43,11 @@ fn advances_in(opt: &usvg::Options, args: &Value) -> Value {
             break;
         }
         db.with_face_data(id, |data, index| {
-            let Ok(f) = ttf_parser::Face::parse(data, index) else { return };
+            let Ok(mut f) = ttf_parser::Face::parse(data, index) else { return };
+            // a variable face (Google's Inter is one file for every weight) at the weight asked, as it's drawn
+            if f.is_variable() {
+                let _ = f.set_variation(ttf_parser::Tag::from_bytes(b"wght"), f32::from(weight));
+            }
             let em = f64::from(f.units_per_em());
             for (c, slot) in chars.iter().zip(out.iter_mut()).filter(|(_, s)| s.is_none()) {
                 if let Some(a) = f.glyph_index(*c).and_then(|g| f.glyph_hor_advance(g)) {

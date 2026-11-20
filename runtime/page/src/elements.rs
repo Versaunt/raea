@@ -269,6 +269,17 @@ pub(crate) fn page_props(kind: &str, props: Option<&Map<String, Value>>, dir: &P
             }
             continue;
         }
+        // raea: an SVG <image>'s href (staticFile's /media/...) as the file, as an img's src is: usvg reads a path
+        if kind == "image" && (k == "href" || k == "xlinkHref" || k == "xlink:href") {
+            if let Some(src) = v.as_str().filter(|s| !s.contains("://") && !s.starts_with("data:") && !s.starts_with('#')) {
+                let p = raea_runtime_react::scene::media_path(dir, src);
+                if !p.exists() {
+                    REFUSED.with(|c| c.borrow_mut().push(format!("missing image: {}", p.display())));
+                }
+                out.insert(k.clone(), Value::String(p.to_string_lossy().into_owned()));
+                continue;
+            }
+        }
         if kind == "img" && k == "src" {
             if let Some(src) = v.as_str() {
                 let path = if src.contains("://") || src.starts_with("data:") { src.to_string() } else {

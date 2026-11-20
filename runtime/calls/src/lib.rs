@@ -204,6 +204,16 @@ pub fn call(name: &str, v: &Value) -> R<Value> {
                 Ok(json!({ "family": family }))
             }
             "fonts.atlases" => font_atlases(v),
+            // a canvas off the page (Remotion's document.createElement("canvas"), sdk/raea/src/remotion/document.ts):
+            // its pixels (getImageData, toDataURL) and its text's advances (measureText), as raea-page answers them
+            "canvas.read" => {
+                raea_sys_canvas::fonts(raea_sys_fonts::google::svg_fonts);
+                raea_sys_canvas::read(v)
+            }
+            "canvas.advances" => {
+                raea_sys_canvas::fonts(raea_sys_fonts::google::svg_fonts);
+                raea_sys_canvas::advances(v)
+            }
             "fonts.face" => {
                 let (family, url) = (s(v, "family")?, s(v, "url")?);
                 let bytes = font_bytes(&url)?;
@@ -250,6 +260,8 @@ pub fn register() {
             ("place.solve", "{ objects: { id: string; size: [number, number, number]; at?: [number, number, number]; yaw?: number; fixed?: boolean }[]; rules: Record<string, string | number>[]; room?: { min: [number, number]; max: [number, number] } }", "{ objects: { id: string; at: [number, number, number]; yaw: number; size: [number, number, number] }[]; found: { part: string; check: string; level: string; says: string }[]; errors: number }", "boxes placed by relations (on, against, beside, near, apart, facing, align, clear), what can't hold found"),
             ("fonts.families", "{}", "string[]", "the system's font families by name, sorted, as fontique (bevy_text's FontCx) lists them"),
             ("fonts.google", "{ family: string }", "{ family: string }", "a Google Fonts family the page loads (its Latin faces, every weight and style, fetched once through raea's URL cache), as a stylesheet link loads it in Chrome (raea/text loadFont)"),
+            ("canvas.read", "{ width: number; height: number; __canvas2d: unknown; x: number; y: number; w: number; h: number }", "{ data: string }", "an off-page canvas's display list drawn and a rectangle of it read back as base64 RGBA (getImageData)"),
+            ("canvas.advances", "{ font: unknown; text: string }", "unknown", "each character's advance in a font as the page's faces draw it (a canvas's measureText)"),
             ("fonts.face", "{ family: string; url: string; weight?: string; style?: string }", "{ family: string }", "a font face for the page from a URL (staticFile's /media/..., a path, http(s) through raea's URL cache, a data: URL), as an @font-face rule gives one (Remotion's loadFont; WOFF2, WOFF, TTF, OTF)"),
             ("fonts.atlases", "{ font: string; size: number; text: string }", "{ width: number; height: number; src: string }[]", "bevy_text's glyph atlases for a text in a font file at a size px, each page a PNG data: URL, as Bevy's FontAtlasSet holds them"),
             ("media.live", "{}", "{ vdecs: number; vencs: number; adecs: number; frames: number; solids: number; worlds: number }", "how many native coders, frames, solids and worlds are alive (for leak checks)"),

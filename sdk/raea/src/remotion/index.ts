@@ -6,7 +6,7 @@
 // Still, Folder, prefetch and the environment calls.
 import { createElement, Fragment, type ReactNode } from "react";
 import { Composition, interpolate, Video, Audio, type CompositionProps } from "../index";
-import { native, hasNative } from "@raea/app/native";
+import { installDocument } from "./document";
 
 export * from "../index";
 export { Video as OffthreadVideo, Video as Html5Video, Audio as Html5Audio };
@@ -122,9 +122,8 @@ export const NoReactInternals = {
 };
 export const Internals = { ...NoReactInternals };
 
-/** A font face for the page, as @font-face gives one: `src` a URL (staticFile, http) or the URL fetchFontData handed back. */
-export function addFontFace(family: string, src: string, descriptors: { weight?: string | number; style?: string } = {}): void {
-  if (!hasNative()) return;
-  const url = String(src).replace(/^url\((['"]?)(.*)\1\)(\s+format\(.*\))?$/, "$2");
-  native("fonts.face" as never, { family, url, weight: String(descriptors.weight ?? "400"), style: descriptors.style ?? "normal" } as never);
-}
+export { addFontFace } from "./face";
+
+// the browser globals Remotion code reaches for off the page (document.createElement("canvas"), document.fonts,
+// FontFace): installed once, where there is no document
+installDocument();

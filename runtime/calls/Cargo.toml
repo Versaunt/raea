@@ -20,6 +20,8 @@ raea-io-media = { path = "../../io/media", default-features = false, features = 
 raea-io-net = { path = "../../io/net" }
 raea-sys-mix = { path = "../../systems/mix" }
 raea-sys-fonts = { path = "../../systems/fonts" }
+# an off-page canvas read back and measured (canvas.read, canvas.advances: a composition's document.createElement("canvas"))
+raea-sys-canvas = { path = "../../systems/canvas" }
 raea-sys-ml = { path = "../../systems/ml", optional = true }
 raea-sys-speech = { path = "../../systems/speech", optional = true }
 bevy = { version = "=0.20.0", default-features = false, features = ["std"] }

@@ -751,6 +751,24 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return filtered(clip);
         }
         let mut all = own;
+        // raea: an inline <svg> with `overflow: visible` draws its shapes past its box (draw_svg): they're its overflow
+        // too, so a filter on it or an ancestor (a drop shadow) takes them in, as Chrome's does
+        #[cfg(feature = "svg")]
+        if !clips_x || !clips_y {
+            if let Some(blitz_dom::node::ImageData::Svg(svg)) = node.element_data().and_then(|e| e.image_data()) {
+                let (w, h) = (size.width, size.height);
+                let tree = svg.tree_at(w, h);
+                {
+                    let b = tree.root().abs_layer_bounding_box();
+                    let vp = match svg.intrinsic_dimensions.view_box {
+                        None => Affine::scale(self.scale),
+                        Some(_) => svg_viewport_affine(svg, w * self.scale as f32, h * self.scale as f32),
+                    };
+                    let r = vp.transform_rect_bbox(Rect::new(b.left() as f64, b.top() as f64, b.right() as f64, b.bottom() as f64));
+                    all = all.union(r);
+                }
+            }
+        }
         let in_flow = node.layout_children.borrow();
         let in_flow = in_flow.iter().flatten().copied().filter(|&c| dom.get_node(c).is_some_and(|c| !c.is_out_of_flow()));
         let pseudos = [node.before(), node.after()].into_iter().flatten().filter(|&c| dom.get_node(c).is_some_and(|c| !c.is_out_of_flow()));
