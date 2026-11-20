@@ -17,10 +17,17 @@ import { classicOf } from "./tsl";
 type V3 = [number, number, number];
 type Q = [number, number, number, number];
 
+/** a matrix taken apart; a scale of 0 on an axis (an object popping in from nothing) has no rotation to find, so its
+ *  quaternion comes out NaN: the object's own rotation stands in (it draws as nothing at that scale, as in three) */
+function decompose(m: THREE.Matrix4, p: THREE.Vector3, q: THREE.Quaternion, s: THREE.Vector3, own?: THREE.Quaternion) {
+  m.decompose(p, q, s);
+  if (![q.x, q.y, q.z, q.w].every(Number.isFinite)) q.copy(own && [own.x, own.y, own.z, own.w].every(Number.isFinite) ? own : new THREE.Quaternion());
+}
+
 /** an object's own transform, from its matrix (so matrixAutoUpdate={false} objects come out as three draws them) */
 function place(o: THREE.Object3D): Props {
   const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
-  o.matrix.decompose(p, q, s);
+  decompose(o.matrix, p, q, s, o.quaternion);
   const out: Props = { position: p.toArray() as V3, quaternion: q.toArray() as Q };
   out.scale = s.x === s.y && s.y === s.z && s.x > 0 ? s.x : (s.toArray() as V3);
   return out;
@@ -134,7 +141,7 @@ function instancedParts(m: THREE.InstancedMesh, name: string, w: Walk, at: Props
   const copies: { position: V3; quaternion: Q; rotation: V3; scale: V3 }[] = [];
   for (let i = 0; i < m.count; i++) {
     m.getMatrixAt(i, one);
-    one.decompose(p, q, s);
+    decompose(one, p, q, s);
     copies.push({ position: p.toArray() as V3, quaternion: q.toArray() as Q, rotation: e.setFromQuaternion(q, "XYZ").toArray().slice(0, 3) as V3, scale: s.toArray() as V3 });
   }
   if (!moving) {
@@ -177,7 +184,7 @@ function batchedParts(b: THREE.BatchedMesh, name: string, w: Walk): Part[] {
     const arrays = arraysOf(b.geometry, { start: range.start, count: range.count, flipV: flipped(material), colors: false });
     if (!arrays) return;
     b.getMatrixAt(i, one);
-    one.decompose(p, q, s);
+    decompose(one, p, q, s);
     let own = surface;
     if (colours) {
       b.getColorAt(i, c);
