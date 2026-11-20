@@ -145,7 +145,7 @@ pub struct Painted(pub Arc<Mutex<Vec<Drawn>>>);
 pub type Drawn = (Handle<Image>, UVec2, vello::Scene, Vec<raea_sys_filters::Filtered>, u64, bool, bool);
 
 /// Each page restyled and laid out (what changed).
-pub fn resolve(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page)>, time: Res<Time>, clock: Res<PageClock>, mut scanned: Local<HashMap<Entity, usize>>) {
+pub fn resolve(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page)>, time: Res<Time>, clock: Res<PageClock>, mut scanned: Local<HashMap<Entity, usize>>, mut faced: Local<HashMap<Entity, usize>>) {
     for (e, page) in &pages {
         let Some(doc) = docs.0.get_mut(&e) else { continue };
         let at = clock.0.unwrap_or_else(|| time.elapsed_secs_f64());
@@ -163,6 +163,13 @@ pub fn resolve(mut docs: NonSendMut<Docs>, pages: Query<(Entity, &Page)>, time: 
         // every one with RAEA_PAGE_GOOGLE_FONTS=1): Chrome
         // loads only what a page links, so a family that isn't installed falls back there (ui-parity's p12 cases name
         // Inter, and so does every composition's root through sdk/react)
+        // faces the composition gave at run time (`fonts.face`: Remotion's loadFont, a FontFace added to document.fonts),
+        // given to the page before it lays text out, as an @font-face rule's are
+        let had = faced.get(&e).copied().unwrap_or(0);
+        if raea_sys_fonts::google::faces_given() > had {
+            faced.insert(e, raea_sys_fonts::google::load_faces(doc, had));
+            doc.resolve(at);
+        }
         if raea_sys_fonts::google::enabled() && scanned.insert(e, doc.tree().len()) != Some(doc.tree().len()) && raea_sys_fonts::google::load_missing(doc) {
             doc.resolve(at);
         }

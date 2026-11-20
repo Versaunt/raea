@@ -11,6 +11,10 @@
 svg|*:not(svg|svg), svg|*:not(svg|foreignObject) > svg|svg {
     transform-origin: 0 0;
 }
+/* raea: Chrome's svg.css: an inner <svg> clips to its viewport unless the page says `overflow: visible` */
+svg|svg {
+    overflow: hidden;
+}
 
 @font-face {
     font-family: -moz-bullet-font;

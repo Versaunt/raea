@@ -2270,6 +2270,15 @@ impl ElementCx<'_, '_> {
 
         // raea: a drawing that reaches outside its viewport (a viewBox's slice, shapes past the box) is clipped to
         // it, as Chrome's `svg:not(:root) { overflow: hidden }` does; blitz drew it whole
+        // raea: `overflow: visible` (an author's, over the user agent's hidden) draws it whole, past its box, as Chrome does
+        {
+            use style::values::computed::Overflow;
+            let bx = self.style.get_box();
+            if bx.clone_overflow_x() == Overflow::Visible && bx.clone_overflow_y() == Overflow::Visible {
+                anyrender_svg::render_svg_tree_in(scene, &tree, transform, host, in_css);
+                return;
+            }
+        }
         let b = tree.root().abs_stroke_bounding_box();
         let (sw, sh) = (svg_size.width(), svg_size.height());
         let spills = b.left() < -0.01 || b.top() < -0.01 || b.right() > sw + 0.01 || b.bottom() > sh + 0.01;

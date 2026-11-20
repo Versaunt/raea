@@ -69,6 +69,11 @@ pub fn media_path(dir: &Path, src: &str) -> PathBuf {
             tried.push(project.join("media"));
         }
         tried.push(project.join("assets"));
+        // a Remotion project's public/ (staticFile serves it there): the nearest folder above the edit holding one
+        // beside its package.json, so a Remotion composition's files load where they are
+        if let Some(remotion) = dir.ancestors().find(|d| d.join("public").is_dir() && d.join("package.json").is_file()) {
+            tried.push(remotion.join("public"));
+        }
         if let Some(p) = tried.iter().map(|d| d.join(rest)).find(|p| p.exists()) {
             return p;
         }

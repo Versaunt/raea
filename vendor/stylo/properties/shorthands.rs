@@ -1004,7 +1004,7 @@ pub mod white_space {
     }
 }
 
-#[cfg(feature = "gecko")]
+// raea: on servo too (-webkit-text-stroke, longhands.toml)
 pub mod _webkit_text_stroke {
     pub use crate::properties::generated::shorthands::_webkit_text_stroke::*;
 

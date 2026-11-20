@@ -6,7 +6,8 @@
 //! A package the edit's folders don't have resolves from the person's plugins last (~/.raea/plugins, RAEA_PLUGINS:
 //! what the raea app's Plugins page installs for every project, docs/ecosystem.feature EC1), so a component a person
 //! installed once imports in any composition.
-use rolldown_plugin::{HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext, PluginContextResolveOptions};
+use rolldown_common::ModuleType;
+use rolldown_plugin::{HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext, PluginContextResolveOptions, SharedLoadPluginContext};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -104,6 +105,13 @@ async fn resolve_from(ctx: &PluginContext, spec: &str, dir: &Path) -> anyhow::Re
 /// ones that need what a native render's JS hasn't (a DOM, web workers) to do what raea's engine does itself.
 /// troika-three-text (drei's <Text>) lays text out in a worker onto a canvas; raea's R3F reader draws its Text as
 /// raea's own text (sdk/r3f/src/input/troika.ts, text.ts; docs/r3f.feature R3F13).
+/// Remotion's packages that raea answers itself, by its file under the work folder's motion/remotion/: the rest of
+/// @remotion/* (paths, shapes, noise, layout-utils, transitions, motion-blur) are plain code that import these
+const REMOTION: &[(&str, &str)] = &[("remotion", "index.ts"), ("remotion/no-react", "index.ts"), ("@remotion/fonts", "fonts.ts"), ("@remotion/three", "three.ts")];
+
+/// The id a Remotion Google font loads by (`load` writes its module): this prefix, then the package's file
+const GOOGLE_FONT: &str = "\0raea-remotion-google-font:";
+
 const STAND_INS: &[(&str, &str)] = &[("troika-three-text", "sdk/r3f/src/input/troika.ts")];
 
 impl Plugin for EditResolve {
@@ -112,7 +120,19 @@ impl Plugin for EditResolve {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId
+        HookUsage::ResolveId | HookUsage::Load
+    }
+
+    /// A Google font of Remotion's (`@remotion/google-fonts/<Family>`): the package's own module for its faces
+    /// (getInfo, fontFamily) with loadFont answered by raea's (sdk/raea/src/remotion/google-fonts.ts)
+    async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+        let Some(real) = args.id.strip_prefix(GOOGLE_FONT) else { return Ok(None) };
+        let ours = self.0.work.join("motion/remotion/google-fonts.ts");
+        let code = format!(
+            "import {{ getInfo, fontFamily }} from {real:?};\nimport {{ googleFont }} from {ours:?};\nexport {{ getInfo, fontFamily }};\nexport const loadFont = (style, options) => googleFont(getInfo(), style, options);\n",
+            ours = ours.to_string_lossy()
+        );
+        Ok(Some(HookLoadOutput { code: code.into(), module_type: Some(ModuleType::Js), ..Default::default() }))
     }
 
     async fn resolve_id(&self, ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
@@ -126,6 +146,23 @@ impl Plugin for EditResolve {
                 if f.is_file() {
                     return Ok(Some(HookResolveIdOutput::from_id(f.to_string_lossy().as_ref())));
                 }
+            }
+        }
+        // a Remotion project's imports, answered by raea (sdk/raea/src/remotion): from the edit, from a package
+        // (@remotion/transitions imports "remotion") and from raea's own copies alike, so there is one timeline
+        if let Some(own) = REMOTION.iter().find(|(p, _)| *p == spec).map(|(_, f)| f) {
+            let f = e.work.join("motion/remotion").join(own);
+            if f.is_file() {
+                return Ok(Some(HookResolveIdOutput::from_id(f.to_string_lossy().as_ref())));
+            }
+        }
+        if spec.starts_with("@remotion/google-fonts/") && e.work.join("motion/remotion/google-fonts.ts").is_file() {
+            let found = match resolve_from(ctx, spec, &e.dir).await? {
+                Some(r) => Some(r),
+                None => resolve_from(ctx, spec, &e.js).await?,
+            };
+            if let Some(r) = found {
+                return Ok(Some(HookResolveIdOutput::from_id(format!("{GOOGLE_FONT}{}", r.id).as_str())));
             }
         }
         let bare = spec.starts_with('@') || spec.starts_with(|c: char| c.is_ascii_lowercase());

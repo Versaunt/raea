@@ -99,3 +99,48 @@ fn fetch(family: &str) -> Vec<(Bytes, f32, bool)> {
     bevy::log::info!("raea-page: Google Fonts {family:?}, {} faces", faces.len());
     faces
 }
+
+/// Faces a composition gave by URL at run time (`fonts.face`: Remotion's `loadFont` from @remotion/fonts and
+/// @remotion/google-fonts, a FontFace added to document.fonts), as an @font-face rule would give them: (bytes,
+/// family, weight or None for a variable face's own range, italic), in the order given. Each page takes the ones it
+/// hasn't yet (`load_faces`).
+static FACES: Mutex<Vec<(Bytes, String, Option<f32>, bool)>> = Mutex::new(Vec::new());
+
+/// A face given by a composition: its file's bytes (TrueType, OpenType, WOFF or WOFF2), family, weight ("400",
+/// "300 900" for a variable face, "bold") and style ("italic"). Err when the bytes aren't a font.
+pub fn add_face(bytes: Vec<u8>, family: &str, weight: &str, style: &str) -> Result<(), String> {
+    let ttf = if bytes.starts_with(b"wOF2") {
+        wuff::decompress_woff2(&bytes).map_err(|e| format!("{family}: not a WOFF2 font ({e:?})"))?
+    } else if bytes.starts_with(b"wOFF") {
+        wuff::decompress_woff1(&bytes).map_err(|e| format!("{family}: not a WOFF font ({e:?})"))?
+    } else {
+        bytes
+    };
+    let w = weight.trim();
+    let weight = match w {
+        "normal" | "" => Some(400.0),
+        "bold" => Some(700.0),
+        w if w.contains(' ') => None,
+        w => w.parse::<f32>().ok(),
+    };
+    let mut faces = FACES.lock().unwrap();
+    if !faces.iter().any(|(b, f, wt, it)| f == family && *wt == weight && *it == (style == "italic") && b.len() == ttf.len()) {
+        faces.push((Bytes::from(ttf), family.to_string(), weight, style.trim() == "italic"));
+    }
+    Ok(())
+}
+
+/// How many faces were given so far (a page compares it with how many it took).
+pub fn faces_given() -> usize {
+    FACES.lock().unwrap().len()
+}
+
+/// Gives `doc` the run-time faces from index `from` on; returns how many there are now.
+pub fn load_faces(doc: &mut BaseDocument, from: usize) -> usize {
+    let faces = FACES.lock().unwrap().clone();
+    for (ttf, family, weight, italic) in faces.iter().skip(from) {
+        let overrides = FontFaceOverrides { family_name: Some(family.clone()), weight: *weight, style: italic.then_some(FontStyle::Italic) };
+        doc.load_resource(ResourceLoadResponse { request_id: usize::MAX, node_id: None, resolved_url: None, result: Ok(Resource::Font(ttf.clone(), overrides)) });
+    }
+    faces.len()
+}

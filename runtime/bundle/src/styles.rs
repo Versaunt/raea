@@ -100,6 +100,95 @@ fn compile(_: &[PathBuf], _: &str) -> R<String> {
     Err("tailwind: this build leaves out the module runtime Tailwind's compiler runs on (the modules feature)".into())
 }
 
+/// A stylesheet a composition imports that is a Tailwind 4 entry (`@import "tailwindcss"`, a Remotion or Vite project's
+/// globals.css): compiled to plain CSS for the page, as @tailwindcss/vite or Remotion's Tailwind plugin would before
+/// the browser sees it. Its classes come from the code its `@source` lines name (relative to it), else from every .ts
+/// and .tsx under `project`; its own relative @imports are read beside it. Any other sheet comes back as it is.
+pub fn tailwind_sheet(file: &Path, project: &Path) -> R<String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if !is_tailwind_entry(&text) {
+        return Ok(text);
+    }
+    let dir = file.parent().unwrap_or(project);
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut imports = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let quoted = |l: &str| l.split(['"', '\'']).nth(1).map(str::to_string);
+        if l.starts_with("@source") && !l.starts_with("@source not") {
+            if let Some(q) = quoted(l) {
+                roots.push(crate::rewrite::normalize(&dir.join(q)));
+            }
+        } else if l.starts_with("@import") {
+            if let Some(q) = quoted(l).filter(|q| q.starts_with('.')) {
+                if let Ok(t) = std::fs::read_to_string(dir.join(&q)) {
+                    imports.insert(q, t);
+                }
+            }
+        }
+    }
+    if roots.is_empty() {
+        roots.push(project.to_path_buf());
+    }
+    let mut code = Vec::new();
+    for r in &roots {
+        code.extend(sources(r));
+    }
+    compile_sheet(&text, &code, &imports).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Whether a stylesheet is a Tailwind 4 entry
+pub fn is_tailwind_entry(css: &str) -> bool {
+    css.contains("@import \"tailwindcss\"") || css.contains("@import 'tailwindcss'") || css.contains("@import \"tailwindcss/") || css.contains("@import 'tailwindcss/")
+}
+
+#[cfg(not(feature = "modules"))]
+fn compile_sheet(_: &str, _: &[PathBuf], _: &std::collections::BTreeMap<String, String>) -> R<String> {
+    Err("tailwind: this build leaves out the module runtime Tailwind's compiler runs on (the modules feature)".into())
+}
+
+/// A whole Tailwind 4 stylesheet compiled for `code`'s candidates: the sheet itself is the input (its @theme, @apply,
+/// custom rules), Tailwind's stylesheets from the package raea ships, its relative @imports from `imports`
+#[cfg(feature = "modules")]
+fn compile_sheet(sheet: &str, code: &[PathBuf], imports: &std::collections::BTreeMap<String, String>) -> R<String> {
+    const SHEET: &str = r#"import { compile } from "./dist/lib.mjs";
+const { candidates, sheet, files, imports } = JSON.parse(process.stdin.text);
+const c = await compile(sheet, {
+  base: "/",
+  loadStylesheet: async (id) => {
+    if (id in imports) return { path: id, base: "/", content: imports[id] };
+    const name = id === "tailwindcss" ? "index.css" : id.replace(/^tailwindcss\//, "");
+    const file = name.endsWith(".css") ? name : name + ".css";
+    if (!(file in files)) throw new Error("tailwind: no stylesheet " + id);
+    return { path: file, base: "/", content: files[file] };
+  },
+});
+process.stdout.write(c.build(candidates));
+"#;
+    let pkg = raea_io_home::home().join("sdk/react/tw/node_modules/tailwindcss");
+    let mut files = BTreeMap::new();
+    for e in std::fs::read_dir(&pkg).map_err(|e| format!("Tailwind's package isn't at {} ({e}; in a checkout: `bun install` in sdk/react/tw)", pkg.display()))?.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "css") {
+            files.insert(p.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&p).map_err(|e| e.to_string())?);
+        }
+    }
+    let input = json!({ "candidates": candidates(code), "sheet": sheet, "files": files, "imports": imports }).to_string();
+    // the same sheet and classes compile to the same CSS: kept by their hash, so a render after the first skips it
+    let key = { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); input.hash(&mut h); h.finish() };
+    let cache = std::env::temp_dir().join(format!("raea-tailwind-{key:016x}.css"));
+    if let Ok(css) = std::fs::read_to_string(&cache) {
+        return Ok(css);
+    }
+    let entry = raea_native::js::Entry::Code { text: SHEET.into(), ts: false, dir: pkg.clone() };
+    let run = raea_native::js::run(&pkg, &pkg, entry, Vec::new(), Default::default(), input, Vec::new(), std::time::Duration::from_secs(120));
+    if run.exit != 0 {
+        return Err(format!("tailwind: {}", run.stderr.chars().take(400).collect::<String>()));
+    }
+    let _ = std::fs::write(&cache, &run.stdout);
+    Ok(run.stdout)
+}
+
 /// The project's CSS: its brand kit's variables, then its Tailwind.
 fn css(space: &Path, code: &[PathBuf]) -> R<String> {
     let theme_file = raea_io_home::home().join("engine/cli/template/theme.css");

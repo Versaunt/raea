@@ -159,6 +159,13 @@ pub fn bundle_fresh(tsx: &Path, out_js: &Path, o: &CompOpts, portable: Option<&P
         let at = o.copy.parent().unwrap();
         let text = std::fs::read_to_string(&o.file).map_err(|e| format!("{}: {e}", o.file.display()))?;
         let to_motion = format!("{}motion", "../".repeat(at.components().count()));
+        // a Tailwind 4 entry it imports (`@import "tailwindcss"`) compiled to plain CSS (styles.rs tailwind_sheet)
+        if o.file.extension().is_some_and(|x| x == "css") {
+            let project = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(&dir).to_path_buf();
+            let css = if crate::styles::is_tailwind_entry(&text) { crate::styles::tailwind_sheet(&o.file, &project)? } else { text };
+            std::fs::write(&to, css).map_err(|e| e.to_string())?;
+            continue;
+        }
         let rewritten = rewrite_into(&point_outside(&text, from_dir, at, &dir, &outs), from_dir, &motion_src, &to_motion, portable).map_err(|e| format!("{}: {e}", o.file.display()))?;
         std::fs::write(&to, rewritten).map_err(|e| e.to_string())?;
     }

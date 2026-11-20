@@ -307,6 +307,9 @@ struct DecorationStackEntry {
     opacity: f32,
     /// raea: its `text-shadow` (inherited), each (x, y, blur) in CSS px and its colour, first on top
     shadows: Vec<(f64, f64, f64, Color)>,
+    /// raea: its `-webkit-text-stroke` (inherited): width in CSS px, colour, and whether `paint-order` puts the
+    /// stroke under the fill (`paint-order: stroke fill`); none when the width is 0
+    stroke: Option<(f64, Color, bool)>,
     /// The decoration this node introduces as a decorating box, if any.
     decoration: Option<ResolvedDecoration>,
 }
@@ -319,6 +322,7 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
             text_color: Color::BLACK,
             opacity: 1.0,
             shadows: Vec::new(),
+            stroke: None,
             decoration: None,
         };
     };
@@ -336,6 +340,15 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
             (sh.horizontal.px() as f64, sh.vertical.px() as f64, sh.blur.px() as f64, color)
         })
         .collect();
+
+    let stroke_width = itext.clone__webkit_text_stroke_width().0 as f64 / 60.0;
+    let stroke = (stroke_width > 0.0).then(|| {
+        use style::values::specified::svg::PaintOrder;
+        let color = itext.clone__webkit_text_stroke_color().resolve_to_absolute(&itext.color).as_color_color();
+        let order = styles.get_inherited_svg().clone_paint_order();
+        let first = (0..3).map(|i| order.order_at(i)).find(|o| matches!(o, PaintOrder::Fill | PaintOrder::Stroke));
+        (stroke_width, color, first == Some(PaintOrder::Stroke))
+    });
 
     let drawn_lines = TextDecorationLine::UNDERLINE
         | TextDecorationLine::OVERLINE
@@ -374,6 +387,7 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
         text_color,
         opacity,
         shadows,
+        stroke,
         decoration,
     }
 }
@@ -802,6 +816,25 @@ fn flush_line_decorations(
     }
 }
 
+/// Glyphs stroked (`-webkit-text-stroke`): draw_glyphs with a stroke style
+#[allow(clippy::too_many_arguments)]
+fn stroke_glyphs(
+    scene: &mut impl PaintScene,
+    font: &peniko::FontData,
+    font_size: f32,
+    hint: bool,
+    coords: &[i16],
+    embolden: kurbo::Vec2,
+    stroke: &kurbo::Stroke,
+    color: Color,
+    alpha: f32,
+    transform: Affine,
+    glyph_xform: Option<Affine>,
+    glyphs: impl Iterator<Item = anyrender::Glyph> + Clone,
+) {
+    scene.draw_glyphs(font, font_size, hint, coords, embolden, stroke, &anyrender::Paint::from(color), alpha, transform, glyph_xform, glyphs);
+}
+
 pub(crate) fn stroke_text<'a>(
     scene: &mut impl PaintScene,
     lines: impl Iterator<Item = Line<'a, TextBrush>>,
@@ -1007,6 +1040,22 @@ pub(crate) fn stroke_text<'a>(
                         scene.pop_layer();
                     }
                 }
+                // raea: -webkit-text-stroke, centred on the outline as Chrome strokes it (Skia's miter join, limit 4),
+                // over the fill or, with `paint-order: stroke`, under it (blitz-paint drew no text stroke)
+                let text_stroke = stack.last().filter(|_| !mask).and_then(|e| e.stroke);
+                let draw_stroke = |scene: &mut _| {
+                    if let Some((w, c, _)) = text_stroke {
+                        let k = kurbo::Stroke::new(w * scale).with_join(kurbo::Join::Miter).with_miter_limit(4.0);
+                        stroke_glyphs(scene, font, font_size, hint_glyphs(glyph_xform.is_some()), normalized_coords, embolden, &k, c, alpha, transform, glyph_xform,
+                            glyph_run.positioned_glyphs().filter(|g| fits(g)).map(|glyph| {
+                                let (x, y) = place(glyph.x, glyph.y, transform);
+                                anyrender::Glyph { id: glyph.id as _, x, y }
+                            }));
+                    }
+                };
+                if text_stroke.is_some_and(|s| s.2) {
+                    draw_stroke(scene);
+                }
                 scene.draw_glyphs(
                     font,
                     font_size,
@@ -1023,6 +1072,9 @@ pub(crate) fn stroke_text<'a>(
                         anyrender::Glyph { id: glyph.id as _, x, y }
                     }),
                 );
+                if text_stroke.is_some_and(|s| !s.2) {
+                    draw_stroke(scene);
+                }
                 // raea: the hyphen a line ends with at a soft hyphen, in this run's font and colour (parley
                 // GlyphRun::raea_hyphen)
                 if let Some(hyphen) = glyph_run.raea_hyphen() {

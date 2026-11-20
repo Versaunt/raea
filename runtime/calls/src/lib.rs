@@ -58,7 +58,30 @@ fn asset_path(p: &str) -> R<std::path::PathBuf> {
 /// A composition opened live from `dir` (its bundle `js`): its assets (useAsset) found from its folder, as a render
 /// finds them; and a game that says lines has Pocket TTS loaded on its worker now, before the
 /// clock starts.
+/// The composition's folder for "/media/..." in calls that need no model (fonts.face), whatever features are built
+static RENDER_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// A font file's bytes by the URL a composition named: http(s) through raea's URL cache, a data: URL, a file URL, or a
+/// path (staticFile's /media/... from the composition's folder, as its images resolve)
+fn font_bytes(url: &str) -> Result<Vec<u8>, String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return raea_io_net::cache::read(url);
+    }
+    if url.starts_with("data:") {
+        return raea_io_net::data_url(url).map(|(_, b)| b).ok_or_else(|| "a data: URL that doesn't read".to_string());
+    }
+    let path = url.strip_prefix("file://").unwrap_or(url);
+    let dir = RENDER_DIR.lock().unwrap().clone().or_else(composition_dir).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let file = if std::path::Path::new(path).is_absolute() && std::path::Path::new(path).exists() {
+        std::path::PathBuf::from(path)
+    } else {
+        raea_core_scene::media_path(&dir, &format!("/{}", raea_core_scene::decoded(path).trim_start_matches('/')))
+    };
+    std::fs::read(&file).map_err(|e| format!("fonts.face: {url} ({}): {e}", file.display()))
+}
+
 pub fn open_in(dir: &std::path::Path, js: &std::path::Path) {
+    *RENDER_DIR.lock().unwrap() = Some(dir.to_path_buf());
     *ASSET_DIR.lock().unwrap() = Some(dir.to_path_buf());
     #[cfg(feature = "ml")]
     {
@@ -73,6 +96,7 @@ pub fn open_in(dir: &std::path::Path, js: &std::path::Path) {
 
 /// A render's composition folder, where its models' calls read from (ml::set_dir; nothing without the ml feature).
 pub fn rendering_in(dir: &std::path::Path) {
+    *RENDER_DIR.lock().unwrap() = Some(dir.to_path_buf());
     #[cfg(feature = "ml")]
     ml::set_dir(dir);
     #[cfg(not(feature = "ml"))]
@@ -180,6 +204,12 @@ pub fn call(name: &str, v: &Value) -> R<Value> {
                 Ok(json!({ "family": family }))
             }
             "fonts.atlases" => font_atlases(v),
+            "fonts.face" => {
+                let (family, url) = (s(v, "family")?, s(v, "url")?);
+                let bytes = font_bytes(&url)?;
+                raea_sys_fonts::google::add_face(bytes, &family, v.get("weight").and_then(|w| w.as_str()).unwrap_or("400"), v.get("style").and_then(|w| w.as_str()).unwrap_or("normal"))?;
+                Ok(json!({ "family": family }))
+            }
             n if n.starts_with("solid.") || n.starts_with("section.") => solid::call(&mut st, n, v),
             n => media::call(&mut st, n, v),
         }
@@ -220,6 +250,7 @@ pub fn register() {
             ("place.solve", "{ objects: { id: string; size: [number, number, number]; at?: [number, number, number]; yaw?: number; fixed?: boolean }[]; rules: Record<string, string | number>[]; room?: { min: [number, number]; max: [number, number] } }", "{ objects: { id: string; at: [number, number, number]; yaw: number; size: [number, number, number] }[]; found: { part: string; check: string; level: string; says: string }[]; errors: number }", "boxes placed by relations (on, against, beside, near, apart, facing, align, clear), what can't hold found"),
             ("fonts.families", "{}", "string[]", "the system's font families by name, sorted, as fontique (bevy_text's FontCx) lists them"),
             ("fonts.google", "{ family: string }", "{ family: string }", "a Google Fonts family the page loads (its Latin faces, every weight and style, fetched once through raea's URL cache), as a stylesheet link loads it in Chrome (raea/text loadFont)"),
+            ("fonts.face", "{ family: string; url: string; weight?: string; style?: string }", "{ family: string }", "a font face for the page from a URL (staticFile's /media/..., a path, http(s) through raea's URL cache, a data: URL), as an @font-face rule gives one (Remotion's loadFont; WOFF2, WOFF, TTF, OTF)"),
             ("fonts.atlases", "{ font: string; size: number; text: string }", "{ width: number; height: number; src: string }[]", "bevy_text's glyph atlases for a text in a font file at a size px, each page a PNG data: URL, as Bevy's FontAtlasSet holds them"),
             ("media.live", "{}", "{ vdecs: number; vencs: number; adecs: number; frames: number; solids: number; worlds: number }", "how many native coders, frames, solids and worlds are alive (for leak checks)"),
             ("media.size", "{ path: string }", "number", "a file's size in bytes"),

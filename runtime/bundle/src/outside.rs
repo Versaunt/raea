@@ -11,7 +11,8 @@ pub struct Outside {
 }
 
 fn specs() -> regex::Regex {
-    regex::Regex::new(r#"(\bfrom\s+)(["'])(\.[^"']*)(["'])"#).unwrap()
+    // `import x from "./x"`, `export ... from "./x"`, and an import for its effect alone (`import "./x.css"`)
+    regex::Regex::new(r#"(\bfrom\s+|\bimport\s+)(["'])(\.[^"']*)(["'])"#).unwrap()
 }
 
 fn absolute(p: &Path) -> PathBuf {
@@ -73,7 +74,7 @@ pub fn outside_in(dir: &Path, roots: &[(&'static str, PathBuf)]) -> R<Vec<Outsid
                 return Err(format!("{}: {spec} is {}, outside raea's home and the project's folder", f.display(), t.display()));
             };
             out.push(Outside { file: t.clone(), copy: Path::new("ext").join(name).join(t.strip_prefix(root).unwrap()) });
-            if matches!(t.extension().and_then(|x| x.to_str()), Some("ts" | "tsx" | "js" | "jsx" | "mjs")) {
+            if matches!(t.extension().and_then(|x| x.to_str()), Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "css")) {
                 queue.push(t);
             }
         }
