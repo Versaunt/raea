@@ -453,8 +453,10 @@ pub(crate) fn style(
     // font-variation-settings sets it (a face without one ignores it). SF (system-ui) at 13 px is its Text cut,
     // 16% wider than the axis's default Display cut Blitz drew it in
     let opsz = parley::Tag::from_bytes(*b"opsz");
+    // The size before CSS zoom, as Chrome takes it: a phone UI drawn at 17 px under zoom 2.7 is SF's Text cut, not
+    // the narrower Display cut its 46 zoomed px would pick (src/native's Phone and Mac zoom their screens)
     if !font_variations.iter().any(|v| v.tag == opsz) {
-        font_variations.push(parley::FontVariation { tag: opsz, value: font_size });
+        font_variations.push(parley::FontVariation { tag: opsz, value: style.effective_zoom.unzoom(font_size) });
     }
     let font_features = self::font_features(font_styles);
 

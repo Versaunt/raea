@@ -357,7 +357,15 @@ fn shape_segment(
             HarfShapeOptions::new()
                 .plan(Some(shaper_plan))
                 .features(&scx.features)
-                .point_size(Some(options.font_size)),
+                // raea: the trak table's size is the opsz the style gave (blitz sets it to the size before CSS
+                // zoom), as Chrome tracks zoomed text by its unzoomed size; else the font size
+                .point_size(Some(
+                    options
+                        .variations
+                        .iter()
+                        .find(|v| v.tag.to_bytes() == *b"opsz")
+                        .map_or(options.font_size, |v| v.value),
+                )),
         );
 
         shaped_text.push_run(
