@@ -1459,7 +1459,7 @@ impl BaseDocument {
             Resource::Font(bytes, overrides) => {
                 // raea: SVG text has the page's faces too
                 #[cfg(feature = "svg")]
-                crate::util::add_svg_font(bytes.to_vec(), overrides.family_name.as_deref());
+                crate::util::add_svg_font(bytes.to_vec(), overrides.family_name.as_deref(), overrides.weight);
                 let font = Blob::new(Arc::new(bytes));
 
                 // Build a `FontInfoOverride` from the `@font-face` descriptors

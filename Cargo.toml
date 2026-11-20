@@ -316,6 +316,9 @@ anyrender = { path = "vendor/anyrender" }
 # boxes, and a drawing clipped to its viewport (changes marked "raea:", docs/blitz-bevy.feature B4b). Back to upstream
 # once anyrender_svg draws these.
 anyrender_svg = { path = "vendor/anyrender_svg" }
+# usvg 0.48.1 with a <tspan>'s leading space kept when the text before it doesn't end in one, and a variable face drawn
+# at the weight it was given as (an @font-face's font-weight), as Chrome draws them (changes marked "raea:").
+usvg = { path = "vendor/usvg" }
 # vello_encoding 0.11.0 with its seven bump buffers' sizes set by the embedder (linebender/vello#1861's
 # BumpAllocationSizes; changes marked "raea:"): raea-page sizes them for its pages, not Vello's 165 MiB of defaults.
 # Back to upstream once #1861 lands.

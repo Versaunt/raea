@@ -348,6 +348,11 @@ fn draw_widened<S: PaintScene, F: FnMut(&mut S, &usvg::Node)>(scene: &mut S, gro
         let local = util::to_bez_path(path);
         // (placed as render_children places them: under `rel`, where the text is; otherwise by their absolute transforms)
         let transform = if rel { at } else { at * util::to_affine(&node.abs_transform()) };
+        // raea: paint-order="stroke" draws the stroke under the fill, as on a path
+        let stroke_first = path.paint_order() == usvg::PaintOrder::StrokeAndFill;
+        if stroke_first {
+            stroke(scene, error_handler, path, transform, &local, node);
+        }
         if let Some(fill) = path.fill()
             && let Some((paint, brush_transform)) = util::to_brush(fill.paint(), usvg::Opacity::ONE)
         {
@@ -362,7 +367,9 @@ fn draw_widened<S: PaintScene, F: FnMut(&mut S, &usvg::Node)>(scene: &mut S, gro
                 scene.pop_layer();
             }
         }
-        stroke(scene, error_handler, path, transform, &local, node);
+        if !stroke_first {
+            stroke(scene, error_handler, path, transform, &local, node);
+        }
     }
     true
 }

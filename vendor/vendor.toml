@@ -171,3 +171,10 @@ upstream = "git:github.com/djeedai/bevy_hanabi@77630ff1eed8b104f34e91d23e9440428
 kind = "patch"
 reason = "frame-pure particles (raea #52): a new particle seeded by its spawn index, not the dead slot it recycles (vfx_init.wesl), and blended effects sorted by view depth from the main camera, far first as Bevy sorts its transparent phase, through the ribbons' sort pass (mod.rs, sort.rs, vfx_sort_fill.wesl); examples and GPU tests dropped"
 exit = "a hanabi with a deterministic mode (both changes offered upstream); then back to the git dependency and drop the copy"
+
+[usvg]
+path = "vendor/usvg"
+upstream = "crates.io:0.48.1"
+kind = "patch"
+reason = "a <tspan>'s leading space kept when the text before it doesn't end in one (trim_text_nodes dropped it whenever a tspan opened: 'a<tspan> b</tspan>' drew 'ab'); a face given at a weight (declare_face_weight: an @font-face's font-weight) drawn at that wght whatever the text asks, as Chrome clamps a variable web font to its face (Google's variable Fredoka for weight 700 drew at 400)"
+exit = "the tspan fix upstream (linebender/resvg); the declared weight stays ours until usvg takes @font-face descriptors"

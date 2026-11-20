@@ -51,9 +51,10 @@ pub(crate) static FONT_DB: LazyLock<Mutex<Arc<fontdb::Database>>> = LazyLock::ne
 });
 
 /// raea: a face for SVG text (a page's @font-face, an app's bundled faces), as HTML text has it; `family` is the name
-/// the page knows it by (an @font-face's font-family), which the face is found by first
+/// the page knows it by (an @font-face's font-family), which the face is found by first; `weight` the weight it was
+/// given as (an @font-face's font-weight), which a variable face is matched and drawn at (vendor/usvg `weighted`)
 #[cfg(feature = "svg")]
-pub fn add_svg_font(bytes: Vec<u8>, family: Option<&str>) {
+pub fn add_svg_font(bytes: Vec<u8>, family: Option<&str>, weight: Option<f32>) {
     let mut db = FONT_DB.lock().unwrap();
     let db = Arc::make_mut(&mut db);
     let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
@@ -62,7 +63,13 @@ pub fn add_svg_font(bytes: Vec<u8>, family: Option<&str>) {
         if let Some(mut info) = db.face(id).cloned() {
             db.remove_face(id);
             info.families.insert(0, (family.to_string(), fontdb::Language::English_UnitedStates));
-            db.push_face_info(info);
+            if let Some(w) = weight {
+                info.weight = fontdb::Weight(w.round().clamp(1.0, 1000.0) as u16);
+            }
+            let id = db.push_face_info(info);
+            if let Some(w) = weight {
+                usvg::declare_face_weight(id, w);
+            }
         }
     }
 }
@@ -255,7 +262,7 @@ pub(crate) fn parse_svg_image(source: &[u8]) -> Result<crate::node::SvgImageData
             let mut h = std::collections::hash_map::DefaultHasher::new();
             (&family, &bytes).hash(&mut h);
             if SEEN.lock().unwrap().insert(h.finish()) {
-                add_svg_font(bytes, Some(&family));
+                add_svg_font(bytes, Some(&family), None);
             }
         }
     }
