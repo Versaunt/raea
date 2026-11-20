@@ -493,7 +493,33 @@ const TILES_1080P: f64 = (120 * 68) as f64;
 /// filled 99% of raea's fixed 2M). bin_data and blend spill don't depend on the size.
 pub fn bump_sizes_for(n_tiles: u32) -> BumpAllocationSizes {
     let base = if BUMP_FULL.load(std::sync::atomic::Ordering::Relaxed) { BumpAllocationSizes::default() } else { BUMP_SIZES.get().copied().unwrap_or_default() };
-    grown(base, n_tiles)
+    let sizes = grown(base, n_tiles);
+    match bump_floor() {
+        Some(f) => BumpAllocationSizes {
+            lines: sizes.lines.max(f.lines),
+            bin_data: sizes.bin_data.max(f.bin_data),
+            tiles: sizes.tiles.max(f.tiles),
+            seg_counts: sizes.seg_counts.max(f.seg_counts),
+            segments: sizes.segments.max(f.segments),
+            blend_spill: sizes.blend_spill.max(f.blend_spill),
+            ptcl: sizes.ptcl.max(f.ptcl),
+        },
+        None => sizes,
+    }
+}
+
+static BUMP_FLOOR: std::sync::Mutex<Option<BumpAllocationSizes>> = std::sync::Mutex::new(None);
+
+/// raea: the least each bump buffer has, whatever sizes a render would have otherwise: raised (raea-page skipped.rs
+/// `fit`) to what a scene that overflowed Vello's own sizes was measured to use, and kept for the renders after, so a
+/// frame past them is drawn again once, not every frame (joeleaver/vello-fork#1's grown sizes, without its GPU read back)
+pub fn bump_floor() -> Option<BumpAllocationSizes> {
+    *BUMP_FLOOR.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// raea: sets the floor (`bump_floor`); None takes it away.
+pub fn set_bump_floor(floor: Option<BumpAllocationSizes>) {
+    *BUMP_FLOOR.lock().unwrap_or_else(|e| e.into_inner()) = floor;
 }
 
 fn grown(base: BumpAllocationSizes, n_tiles: u32) -> BumpAllocationSizes {

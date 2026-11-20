@@ -6,7 +6,8 @@
 //! The read back isn't waited for (a wait on every draw cost a fifth of a render's speed): its answer comes in the
 //! wait for the frame's own pixels. A skipped draw puts Vello's own bump sizes on for the rest of the process and is
 //! counted (raea_gpu_device::check::skipped_draw), and the frame's check (`skip_checked`) draws the frames since again
-//! at those sizes, or refuses one skipped at them too, so the render fails naming it.
+//! at those sizes, each scene measured first and any buffer it overflows grown to fit (`fit`), or refuses one skipped
+//! then too (past the GPU's largest buffer), so the render fails naming it.
 //! RAEA_PAGE_DRAWN_CHECK=0 draws without the check (for measuring what it costs; a skipped draw goes unseen again).
 //! And whether it drew every image: one that finds no room in Vello's image atlas is drawn at no size, again with no
 //! error. A layer with a filter or a perspective transform is such an image, the size of its box, so a page of many
@@ -56,6 +57,9 @@ pub fn render(renderer: &mut vello::Renderer, device: &wgpu::Device, queue: &wgp
     if check {
         queue.write_texture(texel, &SENTINEL, layout, one);
     }
+    if crate::REDRAW_FULL.load(Ordering::Relaxed) {
+        fit(device, scene, params.width, params.height, what);
+    }
     // (the count is this draw's: a resolve that only measures the scene, RAEA_VELLO_BUMP_USE's, counts its own before it)
     vello::low_level::vello_encoding::take_images_left_out();
     renderer.render_to_texture(device, queue, scene, &target.create_view(&Default::default()), params).map_err(|e| format!("vello, {what}: {e}"))?;
@@ -82,8 +86,72 @@ pub fn render(renderer: &mut vello::Renderer, device: &wgpu::Device, queue: &wgp
                 vello::low_level::vello_encoding::set_bump_full(true);
                 eprintln!("raea-page: {what} ({w}x{h}) is past raea's Vello buffers and wasn't drawn: it's drawn again, and every page from now on, at Vello's own sizes");
             }
-            raea_gpu_device::check::skipped_draw(format!("{what} ({w}x{h}) wasn't drawn: its scene is past Vello's bump buffers even at Vello's own sizes (fewer full-frame layers under one filter, or a smaller render, draws it)"));
+            raea_gpu_device::check::skipped_draw(format!("{what} ({w}x{h}) wasn't drawn: its scene is past Vello's bump buffers even grown to what it was measured to use (fewer full-frame layers under one filter, or a smaller render, draws it)"));
         }
     });
     Ok(())
+}
+
+/// A scene drawn again after a skipped draw (lib.rs `REDRAW_FULL`), measured first on the CPU
+/// (raea_gpu_device::bump::measure) and every bump buffer it uses past its size raised to that use and a quarter more,
+/// as joeleaver/vello-fork#1 grows Vello's buffers from a frame's counters (that fork reads them back from the GPU, in
+/// Vello's renderer, which raea doesn't carry). The raised sizes stay for the renders after (vello_encoding
+/// `bump_floor`), so a run of heavy frames is drawn again once, not each. Sizes past the device's largest buffer aren't
+/// kept: the draw is skipped again and the frame refused, naming it. A scene past even 4x its sizes is measured
+/// again at 4x them, up to three times.
+fn fit(device: &wgpu::Device, scene: &vello::Scene, w: u32, h: u32, what: &str) {
+    use vello::low_level::vello_encoding::{BumpAllocationSizes, bump_floor, bump_sizes_for, set_bump_floor};
+    fn field<'a>(s: &'a mut BumpAllocationSizes, name: &str) -> Option<&'a mut u32> {
+        Some(match name {
+            "lines" => &mut s.lines,
+            "binning" => &mut s.bin_data,
+            "tiles" => &mut s.tiles,
+            "seg_counts" => &mut s.seg_counts,
+            "segments" => &mut s.segments,
+            "ptcl" => &mut s.ptcl,
+            "blend" => &mut s.blend_spill,
+            _ => return None,
+        })
+    }
+    let before = bump_floor();
+    let limit = { let l = device.limits(); (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size) };
+    let n_tiles = w.div_ceil(16) * h.div_ceil(16);
+    let mut grew = Vec::new();
+    for _ in 0..3 {
+        let mut had = bump_sizes_for(n_tiles);
+        let mut floor = bump_floor().unwrap_or(BumpAllocationSizes { lines: 0, bin_data: 0, tiles: 0, seg_counts: 0, segments: 0, blend_spill: 0, ptcl: 0 });
+        match raea_gpu_device::bump::measure(scene, w, h) {
+            Ok(u) => {
+                for &(name, used, size) in u.buffers.iter().filter(|b| b.1 > b.2) {
+                    if let (Some(cur), Some(f)) = (field(&mut had, name).copied(), field(&mut floor, name)) {
+                        // the buffer's size here and in `had` differ by bin_data's info for binning: grow by the shortfall
+                        *f = (*f).max(cur.saturating_add(used - size).saturating_add(used / 4));
+                        grew.push(format!("{name} {used}/{size}"));
+                    }
+                }
+                if grew.is_empty() {
+                    return;
+                }
+                set_bump_floor(Some(floor));
+                break;
+            }
+            // past 4x every size: 4x them all, and measure again
+            Err(_) => {
+                for name in ["lines", "binning", "tiles", "seg_counts", "segments", "ptcl", "blend"] {
+                    if let (Some(cur), Some(f)) = (field(&mut had, name).copied(), field(&mut floor, name)) {
+                        *f = (*f).max(cur.saturating_mul(4));
+                    }
+                }
+                set_bump_floor(Some(floor));
+                grew.push("every buffer x4".into());
+            }
+        }
+    }
+    match raea_gpu_device::check::bump_fits(w, h, limit) {
+        Ok(bytes) => eprintln!("raea-page: {what} ({w}x{h}) is past Vello's bump buffers ({}): drawn again with them grown to fit ({} MB), kept for the frames after", grew.join(", "), bytes >> 20),
+        Err(why) => {
+            set_bump_floor(before);
+            eprintln!("raea-page: {what} ({w}x{h}) is past Vello's bump buffers ({}), and grown to fit they'd pass the GPU's: {why}", grew.join(", "));
+        }
+    }
 }
