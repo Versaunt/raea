@@ -142,7 +142,31 @@ export const NoReactInternals = {
   fetchFontData: (url: string) => Promise.resolve(url),
   registerFontFace: (_: unknown) => {},
 };
-export const Internals = { ...NoReactInternals };
+// HTML-in-canvas (Remotion's experimental <HtmlInCanvas>, behind @remotion/transitions' dissolve/swap/book-flip and
+// @remotion/motion-blur's HtmlInCanvasMotionBlur): not supported here, as in a browser without it. The packages read
+// these at load, so CameraMotionBlur and the other presentations import fine; a presentation that needs it says so.
+export const HTML_IN_CANVAS_UNSUPPORTED_MESSAGE = "HTML-in-canvas isn't supported by raea's renderer";
+export const getHtmlInCanvasUnsupportedMessage = () => HTML_IN_CANVAS_UNSUPPORTED_MESSAGE;
+export const isHtmlInCanvasSupported = () => false;
+export const HtmlInCanvas = Object.assign(({ children }: { children?: ReactNode }) => createElement(Fragment, null, children), { isSupported: () => false });
+const passthrough = ({ children }: { children?: ReactNode }) => createElement(Fragment, null, children);
+/** Remotion's Studio-editable wrappers: drawn as their children (the schemas are the Studio's) */
+type Schema = Record<string, { default?: unknown } | undefined>;
+export const Interactive = Object.assign(passthrough, {
+  baseSchema: {},
+  premountSchema: {},
+  /** the component with its schema's defaults under the props it's given */
+  withSchema: ({ Component, schema }: { Component: (p: Record<string, unknown>) => ReactNode; schema?: Schema }) => {
+    const defaults = Object.fromEntries(Object.entries(schema ?? {}).filter(([, v]) => v && "default" in v).map(([k, v]) => [k, v!.default]));
+    return (props: Record<string, unknown>) => createElement(Component as never, { ...defaults, ...props } as never);
+  },
+});
+export const Internals = {
+  ...NoReactInternals,
+  HtmlInCanvasFallback: ({ children, style }: { children?: ReactNode; style?: Record<string, unknown> }) => createElement("div", { style }, children),
+  DisableSequenceRegistrationProvider: passthrough,
+  useHtmlInCanvasUnsupportedMessage: getHtmlInCanvasUnsupportedMessage,
+};
 
 export { addFontFace } from "./face";
 

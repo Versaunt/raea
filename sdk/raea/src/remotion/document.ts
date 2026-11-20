@@ -3,9 +3,9 @@
 // sdk/ui: its pixels and text drawn by the host, systems/canvas), so text is measured, pictures are made and read back
 // (measureText, getImageData, toDataURL) as in Chrome; `document.fonts` and `FontFace`, whose faces go to the page as
 // @font-face would give them (`fonts.face`); and a head and body that take what's appended. Installed once, only where
-// there's no document: a host that has one (raea app's DOM mode) keeps its own. No createElementNS: three.js's image
+// there's no document: a host that has one (raea app's DOM mode) keeps its own. `new Image()` is sdk/ui's. No createElementNS: three.js's image
 // loading stays raea's R3F reader's (sdk/r3f texture.ts stands in for it when there's no createElementNS).
-import { CanvasRenderingContext2D_, Path2D_, ImageData_ } from "../../ui/canvas";
+import { CanvasRenderingContext2D_, Path2D_, ImageData_, canvasGlobals } from "../../ui/canvas";
 import { addFontFace } from "./face";
 
 const g = globalThis as Record<string, unknown> & { __raea_call?: (n: string, a: string) => string | undefined };
@@ -50,7 +50,12 @@ class OffElement {
   remove() { this.parentNode?.removeChild(this); }
   addEventListener() {}
   removeEventListener() {}
-  dispatchEvent() { return true; }
+  /** an event's `on<type>` handler called (`new Image()`'s load and error) */
+  dispatchEvent(e?: { type?: string }) {
+    const h = e?.type ? (this as unknown as Record<string, unknown>)["on" + e.type] : undefined;
+    if (typeof h === "function") h.call(this, Object.assign(Object.create(null), { type: e!.type, target: this, currentTarget: this }));
+    return true;
+  }
   get innerText() { return this.textContent; }
   set innerText(v: string) { this.textContent = String(v); }
   /** Its box as text lays out: a line of its text in its style's font (the canvas's advances: the page's faces),
@@ -164,6 +169,8 @@ export function installDocument() {
     g.removeEventListener ??= () => {};
   }
   g.FontFace ??= FontFace_;
+  // new Image(): sdk/ui's off-page img (a data: URL's size from its header; the picture decoded where it's drawn)
+  g.Image ??= canvasGlobals().Image;
   g.Path2D ??= Path2D_;
   g.ImageData ??= ImageData_;
   g.CanvasRenderingContext2D ??= CanvasRenderingContext2D_;
