@@ -1113,7 +1113,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 cx.stroke_devtools(scene);
             }
             if phase == Phase::Inlines {
-                cx.draw_inline_layout(scene, content_position);
+                cx.draw_inline_layout(scene, content_position, false);
                 cx.draw_marker(scene, content_position);
             }
             cx.draw_phase(scene, cx.transform, clip_rect, phase);
@@ -1373,7 +1373,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                 cx.draw_sub_document(scene);
                                 cx.draw_input(scene);
                                 cx.draw_text_input_text(scene, content_position);
-                                cx.draw_inline_layout(scene, content_position);
+                                cx.draw_inline_layout(scene, content_position, true);
                                 cx.draw_marker(scene, content_position);
                                 cx.draw_children(scene, cx.transform, child_clip_rect);
                                 cx.draw_select_chevron(scene);
@@ -1478,6 +1478,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             list_item: element.list_item_data.as_deref(),
             devtools: self.dom.devtools(),
             custom_widget_scene,
+            deferred_inlines: RefCell::new(None),
         }
     }
 }
@@ -1587,6 +1588,9 @@ struct ElementCx<'dom, 'a> {
     devtools: &'dom DevtoolSettings,
     #[cfg_attr(not(feature = "custom-widget"), expect(unused))]
     custom_widget_scene: Option<&'a Scene>,
+    /// raea: where its inline text was drawn from, when the text of its positioned inline boxes was left for its
+    /// children's positioned phase (draw_inline_layout with `defer` set), and those boxes, in tree order
+    deferred_inlines: RefCell<Option<(Point, Vec<NodeId>)>>,
 }
 
 /// Converts parley BoundingBox into peniko Rect
@@ -1774,7 +1778,69 @@ impl ElementCx<'_, '_> {
         }
     }
 
-    fn draw_inline_layout(&self, scene: &mut impl PaintScene, pos: Point) {
+    /// raea: the positioned inline boxes inside this inline root whose text its layout holds, in tree order
+    fn positioned_inlines(&self) -> Vec<NodeId> {
+        let Some(text_layout) = self.element.inline_layout_data.as_ref().filter(|_| self.node.flags.is_inline_root()) else {
+            return Vec::new();
+        };
+        let dom = self.context.dom;
+        let mut out: Vec<NodeId> = Vec::new();
+        for line in text_layout.layout.lines() {
+            for item in line.items() {
+                if let parley::PositionedLayoutItem::GlyphRun(r) = item
+                    && let Some(p) = crate::text::positioned_inline_owner(dom, self.node.id, r.style().brush.id)
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort_by(|a, b| dom.compare_document_order(*a, *b));
+        out
+    }
+
+    /// raea: the text of the deferred positioned inline boxes that come before `before` in tree order (all of them
+    /// when `before` is None), drawn where draw_inline_layout drew the rest
+    fn draw_deferred_inlines(&self, scene: &mut impl PaintScene, before: Option<NodeId>) {
+        let mut deferred = self.deferred_inlines.borrow_mut();
+        let Some((pos, owners)) = deferred.as_mut() else { return };
+        let dom = self.context.dom;
+        let n = match before {
+            Some(b) => owners.iter().take_while(|&&o| dom.compare_document_order(o, b) == std::cmp::Ordering::Less).count(),
+            None => owners.len(),
+        };
+        if n == 0 {
+            return;
+        }
+        let pos = *pos;
+        let now: Vec<NodeId> = owners.drain(..n).collect();
+        drop(deferred);
+        let Some(text_layout) = self.element.inline_layout_data.as_ref() else { return };
+        let (_, transform) = self.inline_text_at(pos, text_layout.block_offset);
+        let mut cx = self.context.draw_text_context.borrow_mut();
+        for owner in now {
+            cx.layer = crate::text::InlineLayer::Of(owner);
+            // a relative inline box's offset (top/left, else -bottom/-right; percentages taken as 0)
+            let (mut dx, mut dy) = (0.0f64, 0.0f64);
+            if let Some(st) = dom.get_node(owner).and_then(|n| n.primary_styles())
+                && st.clone_position() == style::computed_values::position::T::Relative
+            {
+                use style::values::generics::position::GenericInset as I;
+                let px = |v: &style::values::computed::position::Inset| match v {
+                    I::LengthPercentage(lp) => Some(lp.resolve(style::values::computed::CSSPixelLength::new(0.0)).px() as f64),
+                    _ => None,
+                };
+                let p = st.get_position();
+                dx = px(&p.left).or(px(&p.right).map(|r| -r)).unwrap_or(0.0);
+                dy = px(&p.top).or(px(&p.bottom).map(|b| -b)).unwrap_or(0.0);
+            }
+            let at = transform.pre_translate(kurbo::Vec2::new(dx * self.scale, dy * self.scale));
+            crate::text::stroke_text(scene, text_layout.layout.lines(), dom, at, self.scale, self.node.id, &mut cx);
+        }
+        cx.layer = crate::text::InlineLayer::All;
+    }
+
+    fn draw_inline_layout(&self, scene: &mut impl PaintScene, pos: Point, defer: bool) {
         if self.node.flags.is_inline_root() {
             let text_layout = self.element
                 .inline_layout_data
@@ -1783,6 +1849,7 @@ impl ElementCx<'_, '_> {
                     panic!("Tried to render node marked as inline root that does not have an inline layout: {:?}", self.node);
                 });
 
+            let pos_for_defer = pos;
             let (pos, transform) = self.inline_text_at(pos, text_layout.block_offset);
 
             // Render inline element backgrounds (e.g. `<span style="background: ...">`)
@@ -1823,6 +1890,13 @@ impl ElementCx<'_, '_> {
             // raea: -webkit-line-clamp: its lines only, the last ending in an ellipsis (blitz-dom ends the box there)
             let keep = self.node.primary_styles().and_then(|s| blitz_dom::util::clamped_lines(&s)).filter(|&n| text_layout.layout.len() > n);
             draw_text_context.clamp = keep.map(|n| (n - 1, layout.content_box_width() * text_layout.layout.scale()));
+            // raea: a positioned inline box's text is left for the positioned phase (draw_deferred_inlines), unless the
+            // ellipsis or clamp cuts these lines, which a pass per box couldn't share
+            let owners = if defer && keep.is_none() && draw_text_context.ellipsis.is_none() { self.positioned_inlines() } else { Vec::new() };
+            if !owners.is_empty() {
+                draw_text_context.layer = crate::text::InlineLayer::InFlow;
+                *self.deferred_inlines.borrow_mut() = Some((pos_for_defer, owners));
+            }
             crate::text::stroke_text(
                 scene,
                 text_layout.layout.lines().take(keep.unwrap_or(usize::MAX)),
@@ -1842,6 +1916,7 @@ impl ElementCx<'_, '_> {
             }
             draw_text_context.ellipsis = None;
             draw_text_context.clamp = None;
+            draw_text_context.layer = crate::text::InlineLayer::All;
             drop(draw_text_context);
 
             // raea: a contenteditable's caret (BaseDocument::caret), 1px wide in the caret colour, as a text input's
@@ -2095,6 +2170,33 @@ impl ElementCx<'_, '_> {
         }
     }
 
+    /// raea: draw_phase's positioned phase, with the deferred text of positioned inline boxes drawn in tree order
+    fn draw_positioned_phase_with_inlines(&self, scene: &mut impl PaintScene, parent_style_transform: Affine, clip_rect: Rect) {
+        let Some(children) = self.node.paint_children.borrow().clone() else {
+            return;
+        };
+        let in_flex_or_grid = self
+            .node
+            .primary_styles()
+            .is_some_and(|s| matches!(s.clone_display().inside(), DisplayInside::Flex | DisplayInside::Grid));
+        for child_id in children {
+            let child = &self.context.dom.as_ref().tree()[child_id];
+            let (own, split) = self.context.phase_of(child, in_flex_or_grid);
+            if !split && own != Phase::Positioned {
+                continue;
+            }
+            if !split {
+                self.draw_deferred_inlines(scene, Some(child_id));
+            }
+            let child_transform = self.child_transform(child_id, parent_style_transform);
+            if split {
+                self.context.split.set(Some((child_id, Phase::Positioned)));
+            }
+            self.render_node(scene, child_id, child_transform, clip_rect);
+            self.context.split.set(None);
+        }
+    }
+
     fn draw_children(
         &self,
         scene: &mut impl PaintScene,
@@ -2122,15 +2224,32 @@ impl ElementCx<'_, '_> {
         }
 
         // Regular children
+        // raea: with the text of positioned inline boxes deferred (draw_inline_layout), each drawn just before the
+        // first positioned child after it in tree order, so they interleave as Appendix E's step 8 orders them
+        let deferring = self.deferred_inlines.borrow().is_some();
+        let positioned = |id: NodeId| {
+            self.context.dom.as_ref().tree()[id].primary_styles().is_some_and(|s| s.clone_position() != style::computed_values::position::T::Static)
+        };
         if paint_phases() {
-            for phase in [Phase::Blocks, Phase::Floats, Phase::Inlines, Phase::Positioned] {
+            for phase in [Phase::Blocks, Phase::Floats, Phase::Inlines] {
                 self.draw_phase(scene, parent_style_transform, clip_rect, phase);
+            }
+            if deferring {
+                self.draw_positioned_phase_with_inlines(scene, parent_style_transform, clip_rect);
+            } else {
+                self.draw_phase(scene, parent_style_transform, clip_rect, Phase::Positioned);
             }
         } else if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
+                if deferring && positioned(*child_id) {
+                    self.draw_deferred_inlines(scene, Some(*child_id));
+                }
                 let child_transform = self.child_transform(*child_id, parent_style_transform);
                 self.render_node(scene, *child_id, child_transform, clip_rect);
             }
+        }
+        if deferring {
+            self.draw_deferred_inlines(scene, None);
         }
 
         // Positive z_index hoisted nodes

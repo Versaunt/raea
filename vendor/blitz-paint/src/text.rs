@@ -450,6 +450,40 @@ pub(crate) struct DrawTextContext {
     pub(crate) clamp: Option<(usize, f32)>,
     /// raea: the glyphs as a mask (background-clip: text, #37): in `color`, without their text-shadow
     pub(crate) mask: bool,
+    /// raea: which runs are drawn: a positioned inline box's text paints with the positioned boxes, in tree order
+    /// (CSS 2.1 Appendix E step 8), not with its inline root's in-flow text
+    pub(crate) layer: InlineLayer,
+}
+
+/// raea: the runs of an inline layout one paint pass draws
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InlineLayer {
+    #[default]
+    All,
+    /// all but the text inside a positioned inline box
+    InFlow,
+    /// the text whose nearest positioned inline box is this one
+    Of(NodeId),
+}
+
+/// raea: the nearest positioned inline box between an inline root and a run's node, if any
+pub(crate) fn positioned_inline_owner(doc: &BaseDocument, inline_root_id: NodeId, run_node: NodeId) -> Option<NodeId> {
+    let mut found = None;
+    let mut id = Some(run_node);
+    while let Some(n) = id {
+        if n == inline_root_id {
+            return found;
+        }
+        let node = doc.get_node(n)?;
+        if found.is_none()
+            && node.element_data().is_some()
+            && node.primary_styles().is_some_and(|s| s.clone_position() != style::computed_values::position::T::Static)
+        {
+            found = Some(n);
+        }
+        id = node.parent;
+    }
+    None
 }
 
 /// raea: synthetic bold as Chrome draws it on macOS, in glyph space (it grows with the text): a weight of 600 or more
@@ -853,8 +887,10 @@ pub(crate) fn stroke_text<'a>(
         ellipsis,
         clamp,
         mask,
+        layer,
     } = context;
     let mask = *mask;
+    let layer = *layer;
     let color_override = *color_override;
     let ellipsis = *ellipsis;
     let clamp = *clamp;
@@ -946,6 +982,18 @@ pub(crate) fn stroke_text<'a>(
                     walk_id = doc.get_node(node_id).and_then(|node| node.parent);
                 }
                 path_scratch.reverse();
+
+                if layer != InlineLayer::All {
+                    let owner = positioned_inline_owner(doc, inline_root_id, style.brush.id);
+                    let skip = match layer {
+                        InlineLayer::InFlow => owner.is_some(),
+                        InlineLayer::Of(p) => owner != Some(p),
+                        InlineLayer::All => false,
+                    };
+                    if skip {
+                        continue;
+                    }
+                }
 
                 let shared = stack
                     .iter()
