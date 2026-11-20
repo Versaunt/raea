@@ -7,6 +7,7 @@
 import { createElement, Fragment, type ReactNode } from "react";
 import { Composition, interpolate, Video, Audio, type CompositionProps } from "../index";
 import { installDocument } from "./document";
+import { installPageCanvas } from "./canvas";
 
 export * from "../index";
 export { Video as OffthreadVideo, Video as Html5Video, Audio as Html5Audio };
@@ -127,3 +128,5 @@ export { addFontFace } from "./face";
 // the browser globals Remotion code reaches for off the page (document.createElement("canvas"), document.fonts,
 // FontFace): installed once, where there is no document
 installDocument();
+// a <canvas> on the page drawn through raea's own Canvas 2D (getContext("2d"))
+installPageCanvas();
