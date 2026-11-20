@@ -228,11 +228,12 @@ fn candidates(code: &[PathBuf]) -> Vec<String> {
     let mut out = Vec::new();
     for f in code {
         let Ok(src) = std::fs::read_to_string(f) else { continue };
-        for s in quoted(&src) {
-            for c in s.split(char::is_whitespace) {
-                if !c.is_empty() && seen.insert(c.to_string()) {
-                    out.push(c.to_string());
-                }
+        // every token of the file too, as Tailwind's own scanner reads it: an apostrophe in JSX text ("don't")
+        // opened a "string" that swallowed the classNames up to the next one, and their classes went missing
+        let tokens = src.split(|c: char| c.is_whitespace() || "\"'`{}()<>;,".contains(c));
+        for c in quoted(&src).into_iter().flat_map(|s| s.split(char::is_whitespace)).chain(tokens) {
+            if !c.is_empty() && seen.insert(c.to_string()) {
+                out.push(c.to_string());
             }
         }
     }
