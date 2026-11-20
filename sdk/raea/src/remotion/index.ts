@@ -4,8 +4,8 @@
 // this adds the rest: delayRender and continueRender (on raea's frame hold), OffthreadVideo and the
 // Html5 names (raea's Video already decodes off the page), random and interpolateColors with Remotion's exact results,
 // Still, Folder, prefetch and the environment calls.
-import { createElement, Fragment, type ReactNode } from "react";
-import { Composition, interpolate, Video, Audio, type CompositionProps } from "../index";
+import { createElement, Fragment, useEffect, useReducer, type ReactNode } from "react";
+import { Composition as RaeaComposition, interpolate, Video, Audio, type CompositionProps } from "../index";
 import { installDocument } from "./document";
 import { installPageCanvas } from "./canvas";
 
@@ -19,15 +19,20 @@ let handles = 0;
 type Hold = { n: number; wake: Set<() => void> };
 const HOLD = ((globalThis as { __raeaHold?: Hold }).__raeaHold ??= { n: 0, wake: new Set() });
 const open = new Set<number>();
+let timedOut: string | null = null;
+const onTimeout = new Set<() => void>();
 export const delayRender = (label?: string, opts?: { timeoutInMilliseconds?: number }): number => {
   const h = ++handles;
   open.add(h);
   HOLD.n++;
-  // Remotion's timeout (30 s unless given): a handle never let go doesn't hold the render for ever
+  // Remotion's timeout (30 s unless given): a handle never let go fails the render, as in Remotion, not hold it for ever
   const ms = opts?.timeoutInMilliseconds ?? 30000;
   if (typeof setTimeout === "function") setTimeout(() => {
     if (!open.has(h)) return;
-    console.error(`delayRender("${label ?? ""}") wasn't let go after ${ms} ms: the frame is taken without it`);
+    // Remotion fails the render here; so does raea (a frame taken without it was a blank film that looked done): the
+    // hold let go, the composition throws when it's drawn again (Composition below)
+    timedOut = `delayRender("${label ?? ""}") wasn't let go after ${ms} ms (Remotion's timeout): the render can't take a frame without it`;
+    for (const f of [...onTimeout]) f();
     continueRender(h);
   }, ms);
   return h;
@@ -124,6 +129,30 @@ export function interpolateColors(input: number, inputRange: readonly number[], 
 }
 
 /** A one-frame composition. */
+/** Composition, its component failing the render once a delayRender has timed out (as Remotion's render fails) */
+const guarded = new WeakMap<object, unknown>();
+function guard(c: unknown): unknown {
+  if (typeof c !== "function" && (typeof c !== "object" || c === null)) return c;
+  let g = guarded.get(c as object);
+  if (!g) {
+    g = (props: Record<string, unknown>) => {
+      const [, bump] = useReducer((n: number) => n + 1, 0);
+      useEffect(() => {
+        onTimeout.add(bump);
+        return () => void onTimeout.delete(bump);
+      }, []);
+      if (timedOut) throw new Error(timedOut);
+      return createElement(c as never, props as never);
+    };
+    guarded.set(c as object, g);
+  }
+  return g;
+}
+export function Composition(props: CompositionProps) {
+  const p = props as CompositionProps & { component?: unknown };
+  return createElement(RaeaComposition as never, ("component" in p ? { ...p, component: guard(p.component) } : p) as never);
+}
+
 export function Still(props: Omit<CompositionProps, "durationInFrames" | "fps"> & { fps?: number; durationInFrames?: number }) {
   return createElement(Composition as never, { fps: 30, ...props, durationInFrames: 1 } as never);
 }
