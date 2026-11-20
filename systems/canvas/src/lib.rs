@@ -100,7 +100,24 @@ pub fn read(args: &Value) -> Result<Value, String> {
     use base64::Engine as _;
     let props = args.as_object().ok_or("no canvas")?;
     let opt = page_options();
-    let (bw, bh, px) = Replay::update(None, props, &opt).rgba();
+    // a canvas read again (its uid) is drawn on from where its last read left off, when it's the same list and size: a
+    // composition reading textures back op by op replayed every list whole each time (06-opuscar's paper cut-outs)
+    static KEPT: std::sync::Mutex<Vec<(u64, Replay)>> = std::sync::Mutex::new(Vec::new());
+    let uid = args.get("uid").and_then(Value::as_u64);
+    let old = uid.and_then(|u| {
+        let mut kept = KEPT.lock().unwrap();
+        kept.iter().position(|(k, _)| *k == u).map(|i| kept.remove(i).1)
+    });
+    let replay = Replay::update(old, props, &opt);
+    let (bw, bh, px) = replay.rgba();
+    if let Some(u) = uid {
+        let mut kept = KEPT.lock().unwrap();
+        kept.push((u, replay));
+        // the last few canvases' bitmaps (each width x height x 4 bytes)
+        while kept.len() > 16 {
+            kept.remove(0);
+        }
+    }
     let n = |k: &str| args[k].as_f64().unwrap_or(0.0) as i64;
     let (x, y, w, h) = (n("x"), n("y"), n("w").max(0), n("h").max(0));
     if w * h > 1 << 28 {
@@ -124,6 +141,35 @@ pub fn read(args: &Value) -> Result<Value, String> {
 }
 
 /// The text options a page's canvas draws with now: its fonts (`fonts`) as page_fonts makes them, else the defaults.
+/// An image's type from its first bytes (an .svg by its name or its <svg>)
+pub fn image_mime(bytes: &[u8], name: &str) -> Option<&'static str> {
+    let lower = name.split(['?', '#']).next().unwrap_or(name).to_ascii_lowercase();
+    Some(if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        "image/jpeg"
+    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if lower.ends_with(".svg") || bytes.windows(4).take(1024).any(|w| w == b"<svg") {
+        "image/svg+xml"
+    } else {
+        return None;
+    })
+}
+
+/// An image file's natural size (an off-page `new Image()`'s naturalWidth/naturalHeight): an SVG by its own size,
+/// anything else decoded as drawImage decodes it
+pub fn natural_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
+    if mime == "image/svg+xml" {
+        let s = svg::natural_size(bytes, &page_options())?;
+        return Some((s.x.round().max(1.0) as u32, s.y.round().max(1.0) as u32));
+    }
+    let img = Image::from_buffer(bytes, bevy::image::ImageType::MimeType(mime), bevy::image::CompressedImageFormats::NONE, true, bevy::image::ImageSampler::Default, RenderAssetUsages::RENDER_WORLD).ok()?;
+    Some((img.width(), img.height()))
+}
+
 pub(crate) fn page_options() -> usvg::Options<'static> {
     let db = FONT_SOURCE.get().map(|now| now()).or_else(|| FONTS.lock().unwrap().clone());
     db.map_or_else(usvg::Options::default, |db| page_fonts(&db))

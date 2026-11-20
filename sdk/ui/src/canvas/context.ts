@@ -473,7 +473,8 @@ export class CanvasRenderingContext2D_ {
     const [w, h] = [this.canvas.width, this.canvas.height];
     const gen = w !== this.size[0] || h !== this.size[1] ? this.gen + 1 : this.gen;
     const ops = gen === this.gen ? this.list : [];
-    const r = wire.callSync<{ data: string }>("canvas.read", { width: w, height: h, __canvas2d: { gen, w, h, ops }, x: sx, y: sy, w: sw, h: sh });
+    // (uid: the host keeps this canvas's bitmap between reads and draws only what was added since, systems/canvas read)
+    const r = wire.callSync<{ data: string }>("canvas.read", { uid: this.uid, width: w, height: h, __canvas2d: { gen, w, h, ops }, x: sx, y: sy, w: sw, h: sh });
     const out = new ImageData_(sw, sh);
     if (r) unb64(r.data, out.data);
     return out;

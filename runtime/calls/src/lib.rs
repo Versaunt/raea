@@ -63,6 +63,20 @@ static RENDER_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mut
 
 /// A font file's bytes by the URL a composition named: http(s) through raea's URL cache, a data: URL, a file URL, or a
 /// path (staticFile's /media/... from the composition's folder, as its images resolve)
+/// A composition's media file by its URL (staticFile's /media/..., a path, file://): None for http(s) and data:
+fn media_file(url: &str) -> Option<std::path::PathBuf> {
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") {
+        return None;
+    }
+    let path = url.strip_prefix("file://").unwrap_or(url);
+    let dir = RENDER_DIR.lock().unwrap().clone().or_else(composition_dir).unwrap_or_else(|| std::path::PathBuf::from("."));
+    Some(if std::path::Path::new(path).is_absolute() && std::path::Path::new(path).exists() {
+        std::path::PathBuf::from(path)
+    } else {
+        raea_core_scene::media_path(&dir, &format!("/{}", raea_core_scene::decoded(path).trim_start_matches('/')))
+    })
+}
+
 fn font_bytes(url: &str) -> Result<Vec<u8>, String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         return raea_io_net::cache::read(url);
@@ -214,6 +228,25 @@ pub fn call(name: &str, v: &Value) -> R<Value> {
                 raea_sys_canvas::fonts(raea_sys_fonts::google::svg_fonts);
                 raea_sys_canvas::advances(v)
             }
+            // an off-page `new Image()` of a file (sdk/raea/src/remotion/document.ts): its natural size and its bytes as a
+            // data: URL, which drawImage and the R3F reader decode
+            // an off-page `new Image()` of a file (sdk/raea/src/remotion/document.ts): its natural size, and where drawImage
+            // reads it (a file:// path, which systems/canvas decodes; http(s) and data: as they are)
+            "image.read" => {
+                let src = s(v, "src")?;
+                let file = media_file(&src);
+                let bytes = match &file {
+                    Some(f) => std::fs::read(f).map_err(|e| format!("image.read: {src} ({}): {e}", f.display()))?,
+                    None => font_bytes(&src).map_err(|e| e.replace("fonts.face", "image.read"))?,
+                };
+                let mime = raea_sys_canvas::image_mime(&bytes, &src).ok_or_else(|| format!("image.read: {src}: not an image raea decodes"))?;
+                let (w, h) = raea_sys_canvas::natural_size(&bytes, mime).ok_or_else(|| format!("image.read: {src}: doesn't decode"))?;
+                let url = match file {
+                    Some(f) => format!("file://{}", f.display()),
+                    None => src.to_string(),
+                };
+                Ok(json!({ "width": w, "height": h, "url": url }))
+            }
             "fonts.face" => {
                 let (family, url) = (s(v, "family")?, s(v, "url")?);
                 let bytes = font_bytes(&url)?;
@@ -263,6 +296,7 @@ pub fn register() {
             ("canvas.read", "{ width: number; height: number; __canvas2d: unknown; x: number; y: number; w: number; h: number }", "{ data: string }", "an off-page canvas's display list drawn and a rectangle of it read back as base64 RGBA (getImageData)"),
             ("canvas.advances", "{ font: unknown; text: string }", "unknown", "each character's advance in a font as the page's faces draw it (a canvas's measureText)"),
             ("fonts.face", "{ family: string; url: string; weight?: string; style?: string }", "{ family: string }", "a font face for the page from a URL (staticFile's /media/..., a path, http(s) through raea's URL cache, a data: URL), as an @font-face rule gives one (Remotion's loadFont; WOFF2, WOFF, TTF, OTF)"),
+            ("image.read", "{ src: string }", "{ width: number; height: number; url: string }", "an image file's natural size and where drawImage reads it (a file:// path for a composition's file; http(s) and data: as given): a composition's off-page new Image()"),
             ("fonts.atlases", "{ font: string; size: number; text: string }", "{ width: number; height: number; src: string }[]", "bevy_text's glyph atlases for a text in a font file at a size px, each page a PNG data: URL, as Bevy's FontAtlasSet holds them"),
             ("media.live", "{}", "{ vdecs: number; vencs: number; adecs: number; frames: number; solids: number; worlds: number }", "how many native coders, frames, solids and worlds are alive (for leak checks)"),
             ("media.size", "{ path: string }", "number", "a file's size in bytes"),

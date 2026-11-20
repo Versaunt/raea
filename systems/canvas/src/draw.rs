@@ -218,7 +218,14 @@ impl Ctx<'_> {
         if let Some(p) = self.images.get(src) {
             return Some(p.clone());
         }
-        let (mime, bytes) = raea_io_net::data_url(src)?;
+        // a composition's file (an off-page new Image(): runtime/calls image.read) read from where it is, else a data: URL
+        let (mime, bytes) = match src.strip_prefix("file://") {
+            Some(path) => {
+                let bytes = std::fs::read(path).ok()?;
+                (crate::image_mime(&bytes, path)?.to_string(), bytes)
+            }
+            None => raea_io_net::data_url(src)?,
+        };
         let mime = mime.as_str();
         let img = if mime == "image/svg+xml" {
             let size = crate::svg::natural_size(&bytes, self.opt)?;

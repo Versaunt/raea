@@ -3,9 +3,9 @@
 // sdk/ui: its pixels and text drawn by the host, systems/canvas), so text is measured, pictures are made and read back
 // (measureText, getImageData, toDataURL) as in Chrome; `document.fonts` and `FontFace`, whose faces go to the page as
 // @font-face would give them (`fonts.face`); and a head and body that take what's appended. Installed once, only where
-// there's no document: a host that has one (raea app's DOM mode) keeps its own. `new Image()` is sdk/ui's. No createElementNS: three.js's image
+// there's no document: a host that has one (raea app's DOM mode) keeps its own. `new Image()` reads its file through raea. No createElementNS: three.js's image
 // loading stays raea's R3F reader's (sdk/r3f texture.ts stands in for it when there's no createElementNS).
-import { CanvasRenderingContext2D_, Path2D_, ImageData_, canvasGlobals } from "../../ui/canvas";
+import { CanvasRenderingContext2D_, Path2D_, ImageData_ } from "../../ui/canvas";
 import { addFontFace } from "./face";
 
 const g = globalThis as Record<string, unknown> & { __raea_call?: (n: string, a: string) => string | undefined };
@@ -96,6 +96,57 @@ class OffCanvas extends OffElement {
   toBlob(cb: (b: unknown) => void) { cb(null); }
 }
 
+/** `new Image()`: an img nobody puts on the page */
+class ImageOff extends OffElement {
+  onload: ((e: unknown) => void) | null = null;
+  onerror: ((e: unknown) => void) | null = null;
+  crossOrigin: string | null = null;
+  decoding = "auto";
+  private size: [number, number] | null = null;
+  private url = "";
+  private done = false;
+  private waiting: (() => void)[] = [];
+  constructor(w?: number, h?: number) {
+    super("img");
+    if (w !== undefined) this.setAttribute("width", String(w));
+    if (h !== undefined) this.setAttribute("height", String(h));
+  }
+  get src() { return this.getAttribute("src") ?? ""; }
+  set src(v: string) {
+    v = String(v);
+    this.setAttribute("src", v);
+    this.done = false;
+    let ok = false;
+    try {
+      const out = g.__raea_call?.("image.read", JSON.stringify({ src: v }));
+      const r = out ? (JSON.parse(out) as { width: number; height: number; url: string }) : null;
+      if (r) [this.size, this.url, ok] = [[r.width, r.height], r.url, true];
+    } catch {
+      this.size = null;
+    }
+    setTimeout(() => {
+      this.done = true;
+      this.dispatchEvent({ type: ok ? "load" : "error" });
+      for (const w of this.waiting.splice(0)) w();
+    }, 0);
+  }
+  get currentSrc() { return this.done && this.size ? this.url : ""; }
+  get naturalWidth() { return this.done && this.size ? this.size[0] : 0; }
+  get naturalHeight() { return this.done && this.size ? this.size[1] : 0; }
+  get complete() { return this.done || !this.getAttribute("src"); }
+  get width() { return Number(this.getAttribute("width") ?? (this.size ? this.size[0] : 0)); }
+  set width(v: number) { this.setAttribute("width", String(v)); }
+  get height() { return Number(this.getAttribute("height") ?? (this.size ? this.size[1] : 0)); }
+  set height(v: number) { this.setAttribute("height", String(v)); }
+  decode() {
+    return new Promise<void>((res, rej) => {
+      const settle = () => (this.size ? res() : rej(new Error("decode")));
+      if (this.done) settle();
+      else this.waiting.push(settle);
+    });
+  }
+}
+
 let measuring: CanvasRenderingContext2D_ | undefined;
 function measurer(): CanvasRenderingContext2D_ {
   return (measuring ??= new OffCanvas().getContext("2d") as CanvasRenderingContext2D_);
@@ -151,7 +202,7 @@ export function installDocument() {
     body,
     documentElement: html,
     fonts,
-    createElement: (tag: string) => (String(tag).toLowerCase() === "canvas" ? new OffCanvas() : new OffElement(String(tag))),
+    createElement: (tag: string) => { const t = String(tag).toLowerCase(); return t === "canvas" ? new OffCanvas() : t === "img" ? new ImageOff() : new OffElement(String(tag)); },
     createTextNode: (text: string) => Object.assign(new OffElement("#text"), { textContent: text }),
     getElementById: () => null,
     querySelector: () => null,
@@ -169,8 +220,10 @@ export function installDocument() {
     g.removeEventListener ??= () => {};
   }
   g.FontFace ??= FontFace_;
-  // new Image(): sdk/ui's off-page img (a data: URL's size from its header; the picture decoded where it's drawn)
-  g.Image ??= canvasGlobals().Image;
+  // new Image(): an img off the page whose file raea reads (image.read): its natural size, and its bytes as a data:
+  // URL in currentSrc, which drawImage decodes; load (or error) fires a task later, as in a browser
+  g.Image ??= ImageOff;
+  g.HTMLImageElement ??= ImageOff;
   g.Path2D ??= Path2D_;
   g.ImageData ??= ImageData_;
   g.CanvasRenderingContext2D ??= CanvasRenderingContext2D_;
