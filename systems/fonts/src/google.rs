@@ -143,6 +143,13 @@ pub fn faces_given() -> usize {
 /// Gives `doc` the run-time faces from index `from` on; returns how many there are now.
 pub fn load_faces(doc: &mut BaseDocument, from: usize) -> usize {
     let faces = FACES.lock().unwrap().clone();
+    // a family the composition gives is all its own (raea's bundled faces of that name taken out first, once a
+    // document): Chrome draws a web-font family only in its @font-face faces
+    for family in faces.iter().skip(from).map(|f| f.1.clone()).collect::<std::collections::BTreeSet<_>>() {
+        if !faces.iter().take(from).any(|f| f.1 == family) {
+            doc.shadow_font_family(&family);
+        }
+    }
     for (ttf, family, weight, italic) in faces.iter().skip(from) {
         let overrides = FontFaceOverrides { family_name: Some(family.clone()), weight: *weight, style: italic.then_some(FontStyle::Italic) };
         doc.load_resource(ResourceLoadResponse { request_id: usize::MAX, node_id: None, resolved_url: None, result: Ok(Resource::Font(ttf.clone(), overrides)) });

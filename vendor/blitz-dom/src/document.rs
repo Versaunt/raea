@@ -1363,6 +1363,30 @@ impl BaseDocument {
         crate::net::FONT_LOADS.lock().unwrap().range((self.id, 0)..=(self.id, usize::MAX)).next().is_some()
     }
 
+    /// raea: the faces of `family` the font collection has so far (raea's bundled faces: Inter, IBM Plex Mono...)
+    /// taken out, so the faces a composition gives that family next are all it has, as a web font's @font-face family
+    /// replaces an installed family of that name in Chrome (a family given only at 500 is drawn at 500 for a 400
+    /// request, not in the bundled 400). Returns how many were taken out.
+    pub fn shadow_font_family(&mut self, family: &str) -> usize {
+        fn take(ctx: &mut parley::FontContext, family: &str) -> usize {
+            let Some(info) = ctx.collection.family_by_name(family) else { return 0 };
+            let id = info.id();
+            let fonts: Vec<_> = info.fonts().iter().map(|f| (f.width(), f.style(), f.weight())).collect();
+            fonts.into_iter().filter(|&(w, st, wt)| ctx.collection.unregister_font(id, w, st, wt)).count()
+        }
+        let n = take(&mut self.font_ctx.lock().unwrap(), family);
+        #[cfg(feature = "parallel-construct")]
+        rayon::broadcast(|_ctx| {
+            if let Some(c) = self.thread_font_contexts.get() {
+                take(&mut c.borrow_mut(), family);
+            }
+        });
+        if n > 0 {
+            self.invalidate_inline_contexts();
+        }
+        n
+    }
+
     pub fn load_resource(&mut self, res: ResourceLoadResponse) {
         self.pending_critical_resources.remove(&res.request_id);
         crate::net::FONT_LOADS.lock().unwrap().remove(&(self.id, res.request_id));
