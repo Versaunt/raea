@@ -65,11 +65,8 @@ pub(crate) fn query_font_family(input: &stylo::SingleFontFamily) -> parley::Quer
             'ret: {
                 let name = name.name.as_str();
 
-                // Legacy web compatibility
-                #[cfg(target_vendor = "apple")]
-                if name == "-apple-system" {
-                    break 'ret parley::QueryFamily::Generic(parley::GenericFamily::SystemUi);
-                }
+                // Legacy web compatibility. raea: not -apple-system, which is WebKit's: Chrome on macOS (the lab's
+                // reference) skips it as an unknown family, so `-apple-system, "Helvetica Neue"` draws Helvetica Neue
                 #[cfg(target_os = "macos")]
                 if name == "BlinkMacSystemFont" {
                     break 'ret parley::QueryFamily::Generic(parley::GenericFamily::SystemUi);
@@ -471,13 +468,7 @@ pub(crate) fn style(
                 'ret: {
                     let name = name.name.as_str();
 
-                    // Legacy web compatibility
-                    #[cfg(target_vendor = "apple")]
-                    if name == "-apple-system" {
-                        break 'ret parley::FontFamilyName::Generic(
-                            parley::GenericFamily::SystemUi,
-                        );
-                    }
+                    // Legacy web compatibility (not -apple-system, as Chrome: see query_font_family)
                     #[cfg(target_os = "macos")]
                     if name == "BlinkMacSystemFont" {
                         break 'ret parley::FontFamilyName::Generic(
