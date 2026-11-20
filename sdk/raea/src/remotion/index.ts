@@ -19,10 +19,17 @@ let handles = 0;
 type Hold = { n: number; wake: Set<() => void> };
 const HOLD = ((globalThis as { __raeaHold?: Hold }).__raeaHold ??= { n: 0, wake: new Set() });
 const open = new Set<number>();
-export const delayRender = (_label?: string, _opts?: unknown): number => {
+export const delayRender = (label?: string, opts?: { timeoutInMilliseconds?: number }): number => {
   const h = ++handles;
   open.add(h);
   HOLD.n++;
+  // Remotion's timeout (30 s unless given): a handle never let go doesn't hold the render for ever
+  const ms = opts?.timeoutInMilliseconds ?? 30000;
+  if (typeof setTimeout === "function") setTimeout(() => {
+    if (!open.has(h)) return;
+    console.error(`delayRender("${label ?? ""}") wasn't let go after ${ms} ms: the frame is taken without it`);
+    continueRender(h);
+  }, ms);
   return h;
 };
 export const continueRender = (handle: number): void => {
