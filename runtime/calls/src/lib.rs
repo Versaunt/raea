@@ -301,6 +301,9 @@ pub fn call(name: &str, v: &Value) -> R<Value> {
 pub fn register() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // the page's fonts for every 2D canvas drawn off the page, from the start: a canvas uploaded as a WebGL texture
+        // (runtime/webgl) is drawn without canvas.read or canvas.advances, and its text had no faces until one of those
+        raea_sys_canvas::fonts(raea_sys_fonts::google::svg_fonts);
         const BOUNDS: &str = "{ min: [number, number, number]; max: [number, number, number] }";
         const SOLID: &str = "{ id: number; expr: string }";
         const SECTION: &str = "{ polygons: [number, number][][]; area: number; contours: number; bounds: { min: [number, number]; max: [number, number] } }";

@@ -46,7 +46,11 @@ pub fn install(js: &mut dyn JsEngine) -> Result<(), String> {
     js.native_bytes(
         "__raea_gl",
         Box::new(|bytes, nums| {
-            let len = (nums.first().copied().unwrap_or(0.0) as usize).min(bytes.len());
+            let len = nums.first().copied().unwrap_or(f64::NAN);
+            if !len.is_finite() || len < 0.0 || len > bytes.len() as f64 {
+                return Err(format!("WebGL: byteLength {len} for {} bytes", bytes.len()));
+            }
+            let len = len as usize;
             let id = nums.get(1).copied().unwrap_or(0.0) as u32;
             let cx = context(id)?;
             let mut cx = cx.try_borrow_mut().map_err(|_| format!("WebGL context {id} is already running a call"))?;
@@ -57,7 +61,7 @@ pub fn install(js: &mut dyn JsEngine) -> Result<(), String> {
     let flag = |v: &Value, k: &str, default: bool| v["attrs"][k].as_bool().unwrap_or(default);
     let size = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0).max(1) as u32;
     let id = |v: &Value| v["ctx"].as_u64().unwrap_or(0) as u32;
-    raea_native::register("webgl.create", "{ width: number; height: number; attrs: Record<string, unknown> }", "{ ctx: number; info: unknown }", "a WebGL 2 context on ANGLE for a canvas of this size: its id and what getParameter and getExtension answer (runtime/webgl/PROTOCOL.md)", move |v| {
+    raea_native::register("webgl.create", "{ width: number; height: number; attrs: Record<string, unknown> }", "{ ctx: number; info: unknown; width: number; height: number }", "a WebGL 2 context on ANGLE for a canvas of this size: its id, what getParameter and getExtension answer, and its drawing buffer's size, clamped to the GL limits (runtime/webgl/PROTOCOL.md)", move |v| {
         let attrs = Attrs {
             alpha: flag(v, "alpha", true),
             depth: flag(v, "depth", true),
@@ -67,17 +71,17 @@ pub fn install(js: &mut dyn JsEngine) -> Result<(), String> {
             preserve_drawing_buffer: flag(v, "preserveDrawingBuffer", false),
         };
         let cx = angle::create(size(v, "width"), size(v, "height"), attrs)?;
-        let info = cx.info();
+        let (info, width, height) = (cx.info(), cx.width, cx.height);
         let ctx = NEXT.fetch_add(1, Ordering::Relaxed);
         CONTEXTS.with(|c| c.borrow_mut().insert(ctx, Rc::new(RefCell::new(cx))));
-        Ok(json!({ "ctx": ctx, "info": info }))
+        Ok(json!({ "ctx": ctx, "info": info, "width": width, "height": height }))
     });
-    raea_native::register("webgl.resize", "{ ctx: number; width: number; height: number }", "null", "a WebGL context's drawing buffer remade at a new size, cleared", move |v| {
+    raea_native::register("webgl.resize", "{ ctx: number; width: number; height: number }", "{ width: number; height: number }", "a WebGL context's drawing buffer remade at a new size, cleared: the size it got, clamped to the GL limits", move |v| {
         let cx = context(id(v))?;
         let mut cx = cx.borrow_mut();
         cx.make_current()?;
         cx.resize(size(v, "width"), size(v, "height"))?;
-        Ok(Value::Null)
+        Ok(json!({ "width": cx.width, "height": cx.height }))
     });
     raea_native::register("webgl.destroy", "{ ctx: number }", "null", "a WebGL context and everything it made, freed", move |v| {
         let ctx = id(v);

@@ -137,7 +137,7 @@ fn short(url: &str) -> &str {
 /// unpack.premultiply, converted to `format`/`ty`.
 pub fn for_upload(px: &Pixels, unpack: &Unpack, format: u32, ty: u32) -> Result<Vec<u8>, String> {
     let (w, h) = (px.width as usize, px.height as usize);
-    if px.data.len() != w * h * 4 {
+    if w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(px.data.len()) {
         return Err(format!("WebGL: a {w}x{h} source with {} bytes", px.data.len()));
     }
     let emit: fn(&mut Vec<u8>, [u8; 4]) = match (format, ty) {
@@ -161,7 +161,7 @@ pub fn for_upload(px: &Pixels, unpack: &Unpack, format: u32, ty: u32) -> Result<
         },
         // floats: the normalized value, multiplied by alpha in float when premultiplying (as Chrome does), no sRGB
         // decoding (an SRGB8_ALPHA8 internal format makes GL decode)
-        (RGBA | RGB | RG | RED, FLOAT | HALF_FLOAT) => return Ok(floats(px, unpack, channels(format), ty == HALF_FLOAT)),
+        (RGBA | RGB | RG | RED, FLOAT | HALF_FLOAT) => return floats(px, unpack, channels(format), ty == HALF_FLOAT),
         _ => return Err(format!("WebGL: a DOM source can't be uploaded as format 0x{format:X} type 0x{ty:X}")),
     };
     let row = |y: usize| {
@@ -198,9 +198,10 @@ fn channels(format: u32) -> usize {
 }
 
 /// `px` as `n` float or half-float components a pixel.
-fn floats(px: &Pixels, unpack: &Unpack, n: usize, half: bool) -> Vec<u8> {
+fn floats(px: &Pixels, unpack: &Unpack, n: usize, half: bool) -> Result<Vec<u8>, String> {
     let (w, h) = (px.width as usize, px.height as usize);
-    let mut out = Vec::with_capacity(w * h * n * if half { 2 } else { 4 });
+    let size = [w, h, n, if half { 2 } else { 4 }].into_iter().try_fold(1usize, usize::checked_mul);
+    let mut out = Vec::with_capacity(size.ok_or_else(|| format!("WebGL: a {w}x{h} float upload's size overflows"))?);
     for y in 0..h {
         let sy = if unpack.flip_y { h - 1 - y } else { y };
         for c in px.data[sy * w * 4..(sy + 1) * w * 4].chunks_exact(4) {
@@ -218,7 +219,7 @@ fn floats(px: &Pixels, unpack: &Unpack, n: usize, half: bool) -> Vec<u8> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// `c` times `a`, 8-bit, rounded as Skia rounds.
@@ -247,10 +248,24 @@ fn pixel_bytes(format: u32, ty: u32) -> Option<usize> {
     Some(n * size)
 }
 
-/// FLIP_Y and PREMULTIPLY applied to a typed-array upload's bytes (rows laid out by `alignment` and `row_length`, 0 =
-/// width); None when neither flag is set (upload as is).
+/// FLIP_Y and PREMULTIPLY applied to a typed-array upload: the `width` x `height` rectangle the UNPACK layout selects
+/// (rows of `row_length` pixels, 0 = width, padded to `alignment`, starting `skip_rows` rows and `skip_pixels` pixels
+/// in) cut out, flipped and premultiplied, and returned tightly packed (alignment 1, no row length or skips). None when
+/// neither flag changes anything or the array is too short for the layout (upload as is: a short array is GL's own
+/// error). An error when the layout's size overflows.
 #[allow(clippy::too_many_arguments)]
-pub fn flip_premultiply(bytes: &[u8], width: u32, height: u32, format: u32, ty: u32, unpack: &Unpack, alignment: u32, row_length: u32) -> Option<Vec<u8>> {
+pub fn flip_premultiply(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    format: u32,
+    ty: u32,
+    unpack: &Unpack,
+    alignment: u32,
+    row_length: u32,
+    skip_pixels: u32,
+    skip_rows: u32,
+) -> Result<Option<Vec<u8>>, String> {
     let premultiply: Option<fn(&mut [u8])> = match (unpack.premultiply, format, ty) {
         (false, ..) => None,
         (true, RGBA, UNSIGNED_BYTE) => Some(|r| r.chunks_exact_mut(4).for_each(|p| (0..3).for_each(|i| p[i] = mul8(p[i], p[3])))),
@@ -293,33 +308,34 @@ pub fn flip_premultiply(bytes: &[u8], width: u32, height: u32, format: u32, ty: 
         (true, ..) => None,
     };
     if !unpack.flip_y && premultiply.is_none() {
-        return None;
+        return Ok(None);
     }
-    let bpp = pixel_bytes(format, ty)?;
+    let Some(bpp) = pixel_bytes(format, ty) else { return Ok(None) };
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 {
-        return None;
+        return Ok(None);
     }
+    let over = || format!("WebGL: a {w}x{h} upload's size under the UNPACK state overflows");
     let align = alignment.max(1) as usize;
-    let stride = (if row_length > 0 { row_length as usize } else { w } * bpp).div_ceil(align) * align;
-    let row = w * bpp;
-    // a short array is GL's own error (INVALID_OPERATION)
-    if bytes.len() < (h - 1) * stride + row {
-        return None;
+    let row = w.checked_mul(bpp).ok_or_else(over)?;
+    let stride = (if row_length > 0 { row_length as usize } else { w }).checked_mul(bpp).and_then(|n| n.div_ceil(align).checked_mul(align));
+    let stride = stride.ok_or_else(over)?;
+    // where row y of the rectangle starts
+    let start = |y: usize| (skip_rows as usize).checked_add(y)?.checked_mul(stride)?.checked_add((skip_pixels as usize).checked_mul(bpp)?);
+    let end = start(h - 1).and_then(|s| s.checked_add(row)).ok_or_else(over)?;
+    if bytes.len() < end {
+        return Ok(None);
     }
-    let mut out = bytes.to_vec();
-    if unpack.flip_y {
-        for y in 0..h {
-            let src = (h - 1 - y) * stride;
-            out[y * stride..y * stride + row].copy_from_slice(&bytes[src..src + row]);
-        }
+    let mut out = Vec::with_capacity(row.checked_mul(h).ok_or_else(over)?);
+    for y in 0..h {
+        // every start is at most the last row's, which didn't overflow
+        let s = start(if unpack.flip_y { h - 1 - y } else { y }).unwrap();
+        out.extend_from_slice(&bytes[s..s + row]);
     }
     if let Some(f) = premultiply {
-        for y in 0..h {
-            f(&mut out[y * stride..y * stride + row]);
-        }
+        out.chunks_exact_mut(row).for_each(f);
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// An f32 as IEEE half, rounded to nearest even.
@@ -457,38 +473,68 @@ mod tests {
         let mut bytes: Vec<u8> = (1..=9).collect();
         bytes.extend([0xEE; 3]);
         bytes.extend(11..=19);
-        assert_eq!(flip_premultiply(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &PLAIN, 4, 0), None);
-        let out = flip_premultiply(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 4, 0).unwrap();
-        assert_eq!(out.len(), 21);
+        assert_eq!(fp(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &PLAIN, 4, 0), None);
+        // flipped and tightly packed: 9-byte rows
+        let out = fp(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 4, 0).unwrap();
+        assert_eq!(out.len(), 18);
         assert_eq!(&out[..9], (11..=19).collect::<Vec<u8>>().as_slice());
-        assert_eq!(&out[12..21], (1..=9).collect::<Vec<u8>>().as_slice());
+        assert_eq!(&out[9..], (1..=9).collect::<Vec<u8>>().as_slice());
         // RGB has no alpha: premultiply alone leaves it as is
-        assert_eq!(flip_premultiply(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &PREMUL, 4, 0), None);
+        assert_eq!(fp(&bytes, 3, 2, RGB, UNSIGNED_BYTE, &PREMUL, 4, 0), None);
         // too short for its layout: GL's error, not ours
-        assert_eq!(flip_premultiply(&bytes[..20], 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 4, 0), None);
+        assert_eq!(fp(&bytes[..20], 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 4, 0), None);
         // row_length 4 at alignment 1: 12-byte rows, 3 pixels used
         let rl: Vec<u8> = (0..24).collect();
-        let out = flip_premultiply(&rl, 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 1, 4).unwrap();
+        let out = fp(&rl, 3, 2, RGB, UNSIGNED_BYTE, &FLIP, 1, 4).unwrap();
         assert_eq!(&out[..9], &rl[12..21]);
-        assert_eq!(&out[12..21], &rl[..9]);
+        assert_eq!(&out[9..], &rl[..9]);
+    }
+
+    /// flip_premultiply with no skips, unwrapped.
+    #[allow(clippy::too_many_arguments)]
+    fn fp(bytes: &[u8], w: u32, h: u32, format: u32, ty: u32, unpack: &Unpack, alignment: u32, row_length: u32) -> Option<Vec<u8>> {
+        flip_premultiply(bytes, w, h, format, ty, unpack, alignment, row_length, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn typed_arrays_skips_select_the_rectangle() {
+        // a 4x3 RGBA image, pixel (x, y) = [x, y, 9, 255] except alpha 0 at (2, 1); a 2x2 rectangle from (1, 1)
+        let mut img = Vec::new();
+        for y in 0..3u8 {
+            for x in 0..4u8 {
+                img.extend([x, y, 9, if (x, y) == (2, 1) { 0 } else { 255 }]);
+            }
+        }
+        let out = flip_premultiply(&img, 2, 2, RGBA, UNSIGNED_BYTE, &FLIP, 4, 4, 1, 1).unwrap().unwrap();
+        // the rectangle's rows 2 then 1, tightly packed
+        assert_eq!(out, [1, 2, 9, 255, 2, 2, 9, 255, 1, 1, 9, 255, 2, 1, 9, 0]);
+        let out = flip_premultiply(&img, 2, 2, RGBA, UNSIGNED_BYTE, &BOTH, 4, 4, 1, 1).unwrap().unwrap();
+        assert_eq!(&out[8..], [1, 1, 9, 255, 0, 0, 0, 0]);
+        // RGB rows padded to 4 with a skip: 2 pixels of 3 bytes from pixel 1 of row 1, 8-byte stride (row_length 2)
+        let rgb: Vec<u8> = (0..24).collect();
+        let out = flip_premultiply(&rgb, 1, 2, RGB, UNSIGNED_BYTE, &FLIP, 4, 2, 1, 1).unwrap().unwrap();
+        assert_eq!(out, [19, 20, 21, 11, 12, 13]);
+        // the selection running past the array is GL's error; sizes past usize are ours
+        assert_eq!(flip_premultiply(&img, 2, 2, RGBA, UNSIGNED_BYTE, &FLIP, 4, 4, 3, 1).unwrap(), None);
+        assert!(flip_premultiply(&img, 2, 2, RGBA, UNSIGNED_BYTE, &FLIP, 4, u32::MAX, 0, u32::MAX).is_err());
     }
 
     #[test]
     fn typed_arrays_premultiplied() {
         let rgba = [200u8, 100, 50, 128, 10, 20, 30, 255];
-        assert_eq!(flip_premultiply(&rgba, 2, 1, RGBA, UNSIGNED_BYTE, &PREMUL, 4, 0).unwrap(), [100, 50, 25, 128, 10, 20, 30, 255]);
-        assert_eq!(flip_premultiply(&[200, 128, 7, 0], 2, 1, LUMINANCE_ALPHA, UNSIGNED_BYTE, &PREMUL, 4, 0).unwrap(), [100, 128, 0, 0]);
+        assert_eq!(fp(&rgba, 2, 1, RGBA, UNSIGNED_BYTE, &PREMUL, 4, 0).unwrap(), [100, 50, 25, 128, 10, 20, 30, 255]);
+        assert_eq!(fp(&[200, 128, 7, 0], 2, 1, LUMINANCE_ALPHA, UNSIGNED_BYTE, &PREMUL, 4, 0).unwrap(), [100, 128, 0, 0]);
         let s = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
-        assert_eq!(flip_premultiply(&s(&[0xFFF5]), 1, 1, RGBA, UNSIGNED_SHORT_4_4_4_4, &PREMUL, 4, 0).unwrap(), s(&[0x5555]));
-        assert_eq!(flip_premultiply(&s(&[0xFFFE, 0xFFFF]), 2, 1, RGBA, UNSIGNED_SHORT_5_5_5_1, &PREMUL, 4, 0).unwrap(), s(&[0, 0xFFFF]));
+        assert_eq!(fp(&s(&[0xFFF5]), 1, 1, RGBA, UNSIGNED_SHORT_4_4_4_4, &PREMUL, 4, 0).unwrap(), s(&[0x5555]));
+        assert_eq!(fp(&s(&[0xFFFE, 0xFFFF]), 2, 1, RGBA, UNSIGNED_SHORT_5_5_5_1, &PREMUL, 4, 0).unwrap(), s(&[0, 0xFFFF]));
         let f: Vec<u8> = [0.8f32, 0.4, 1.0, 0.5].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let out = flip_premultiply(&f, 1, 1, RGBA, FLOAT, &PREMUL, 4, 0).unwrap();
+        let out = fp(&f, 1, 1, RGBA, FLOAT, &PREMUL, 4, 0).unwrap();
         assert_eq!(out, [0.4f32, 0.2, 0.5, 0.5].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
         let hf = s(&[to_half(0.8), to_half(1.0), 0, to_half(0.5)]);
-        let out = flip_premultiply(&hf, 1, 1, RGBA, HALF_FLOAT, &PREMUL, 4, 0).unwrap();
+        let out = fp(&hf, 1, 1, RGBA, HALF_FLOAT, &PREMUL, 4, 0).unwrap();
         assert_eq!(out, s(&[to_half(0.4), to_half(0.5), 0, to_half(0.5)]));
         // flipped and premultiplied: 2 rows of 1 RGBA pixel
-        assert_eq!(flip_premultiply(&[255, 255, 255, 0, 10, 20, 30, 255], 1, 2, RGBA, UNSIGNED_BYTE, &BOTH, 4, 0).unwrap(), [10, 20, 30, 255, 0, 0, 0, 0]);
+        assert_eq!(fp(&[255, 255, 255, 0, 10, 20, 30, 255], 1, 2, RGBA, UNSIGNED_BYTE, &BOTH, 4, 0).unwrap(), [10, 20, 30, 255, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -507,7 +553,7 @@ mod tests {
         assert_eq!(pixel_bytes(RED, INT), Some(4));
         // RG32F 4x2 flipped: 32-byte rows swapped
         let b: Vec<u8> = (0..64).collect();
-        let out = flip_premultiply(&b, 4, 2, RG, FLOAT, &FLIP, 4, 0).unwrap();
+        let out = fp(&b, 4, 2, RG, FLOAT, &FLIP, 4, 0).unwrap();
         assert_eq!(&out[..32], &b[32..]);
         assert_eq!(&out[32..], &b[..32]);
     }

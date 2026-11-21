@@ -38,7 +38,6 @@ type View = ArrayBufferView;
 const FLUSH_WORDS = 2 << 20;
 /** blob element kinds for number lists */
 const F32 = 0, I32 = 1, U32 = 2;
-const COMPLETION_STATUS_KHR = 0x91b1;
 const UNMASKED_VENDOR = 0x9245, UNMASKED_RENDERER = 0x9246;
 
 /** WebGL 2 names with no op yet: each throws when called */
@@ -71,13 +70,6 @@ const EXT_CONSTANTS: Record<string, Record<string, number>> = {
   EXT_texture_compression_bptc: { COMPRESSED_RGBA_BPTC_UNORM_EXT: 0x8e8c, COMPRESSED_SRGB_ALPHA_BPTC_UNORM_EXT: 0x8e8d, COMPRESSED_RGB_BPTC_SIGNED_FLOAT_EXT: 0x8e8e, COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_EXT: 0x8e8f },
   EXT_texture_compression_rgtc: { COMPRESSED_RED_RGTC1_EXT: 0x8dbb, COMPRESSED_SIGNED_RED_RGTC1_EXT: 0x8dbc, COMPRESSED_RED_GREEN_RGTC2_EXT: 0x8dbd, COMPRESSED_SIGNED_RED_GREEN_RGTC2_EXT: 0x8dbe },
   EXT_texture_norm16: { R16_EXT: 0x822a, RG16_EXT: 0x822c, RGB16_EXT: 0x8054, RGBA16_EXT: 0x805b, R16_SNORM_EXT: 0x8f98, RG16_SNORM_EXT: 0x8f99, RGB16_SNORM_EXT: 0x8f9a, RGBA16_SNORM_EXT: 0x8f9b },
-  EXT_texture_mirror_clamp_to_edge: { MIRROR_CLAMP_TO_EDGE_EXT: 0x8743 },
-  EXT_depth_clamp: { DEPTH_CLAMP_EXT: 0x864f },
-  EXT_disjoint_timer_query_webgl2: { QUERY_COUNTER_BITS_EXT: 0x8864, TIME_ELAPSED_EXT: 0x88bf, TIMESTAMP_EXT: 0x8e28, GPU_DISJOINT_EXT: 0x8fbb },
-  KHR_parallel_shader_compile: { COMPLETION_STATUS_KHR: 0x91b1 },
-  EXT_clip_control: { LOWER_LEFT_EXT: 0x8ca1, UPPER_LEFT_EXT: 0x8ca2, NEGATIVE_ONE_TO_ONE_EXT: 0x935e, ZERO_TO_ONE_EXT: 0x935f, CLIP_ORIGIN_EXT: 0x935c, CLIP_DEPTH_MODE_EXT: 0x935d },
-  EXT_polygon_offset_clamp: { POLYGON_OFFSET_CLAMP_EXT: 0x8e1b },
-  WEBGL_provoking_vertex: { FIRST_VERTEX_CONVENTION_WEBGL: 0x8e4d, LAST_VERTEX_CONVENTION_WEBGL: 0x8e4e, PROVOKING_VERTEX_WEBGL: 0x8e4f },
 };
 const ASTC_SIZES = ["4x4", "5x4", "5x5", "6x5", "6x6", "8x5", "8x6", "8x8", "10x5", "10x6", "10x8", "10x10", "12x10", "12x12"];
 ASTC_SIZES.forEach((s, i) => {
@@ -210,9 +202,12 @@ export class WebGL2RenderingContext_ {
     this.w = Math.max(1, Math.floor(host.width) || 0);
     this.h = Math.max(1, Math.floor(host.height) || 0);
     const out = g.__raea_call("webgl.create", JSON.stringify({ width: this.w, height: this.h, attrs: a }));
-    const r = JSON.parse(String(out)) as { ctx: number; info: Info };
+    const r = JSON.parse(String(out)) as { ctx: number; info: Info; width: number; height: number };
     this._ctx = r.ctx;
     this.info = r.info;
+    // the drawing buffer, clamped to the GL limits
+    this.w = r.width ?? this.w;
+    this.h = r.height ?? this.h;
     for (const [k, v] of Object.entries(r.info.params ?? {})) {
       const n = Number(k);
       this.consts.set(n, Array.isArray(v) ? (n === GL.ALIASED_LINE_WIDTH_RANGE || n === GL.ALIASED_POINT_SIZE_RANGE ? new Float32Array(v) : new Int32Array(v)) : v);
@@ -280,7 +275,7 @@ export class WebGL2RenderingContext_ {
     if (!n || this.dead) return undefined;
     return g.__raea_gl!(this.u8, n, this._ctx);
   }
-  private c0(op: number) { this.i32[this.r(1)] = op; }
+  private c0(op: number) { const p = this.r(1); this.i32[p] = op; }
   private c1(op: number, a: number) { const p = this.r(2), m = this.i32; m[p] = op; m[p + 1] = a; }
   private c2(op: number, a: number, b: number) { const p = this.r(3), m = this.i32; m[p] = op; m[p + 1] = a; m[p + 2] = b; }
   private c3(op: number, a: number, b: number, c: number) { const p = this.r(4), m = this.i32; m[p] = op; m[p + 1] = a; m[p + 2] = b; m[p + 3] = c; }
@@ -307,6 +302,8 @@ export class WebGL2RenderingContext_ {
     const off = srcOffset * bpe;
     this.blob(v.buffer, v.byteOffset + off, length ? length * bpe : v.byteLength - off);
   }
+  /** an empty blob */
+  private zero() { const at = this.rc(1); this.u32[at] = 0; }
   /** a list of numbers as a blob of f32/i32/u32 */
   private nums(d: Nums, kind: number, srcOffset = 0, length = 0) {
     let n = length ? length : d.length - srcOffset;
@@ -351,17 +348,21 @@ export class WebGL2RenderingContext_ {
 
   _snapshot(gen: number) { this.c1(OP.snapshot, gen); this._flush(); }
   _readCanvas(): Uint8Array {
+    // a destroyed context reads as transparent black
+    if (this.dead) return new Uint8Array(this.w * this.h * 4);
     this.c0(OP.readCanvas);
     const r = this._flush();
-    return r instanceof ArrayBuffer ? new Uint8Array(r) : new Uint8Array(this.w * this.h * 4);
+    if (!(r instanceof ArrayBuffer)) throw new Error("WebGL: reading the canvas answered no pixels");
+    return new Uint8Array(r);
   }
   _resize(width: number, height: number) {
     if (this.dead) return;
     this._flush();
     const w = Math.max(1, Math.floor(width) || 0), h = Math.max(1, Math.floor(height) || 0);
-    g.__raea_call!("webgl.resize", JSON.stringify({ ctx: this._ctx, width: w, height: h }));
-    this.w = w;
-    this.h = h;
+    const out = g.__raea_call!("webgl.resize", JSON.stringify({ ctx: this._ctx, width: w, height: h }));
+    const r = JSON.parse(String(out)) as { width: number; height: number };
+    this.w = r.width;
+    this.h = r.height;
   }
   _destroy() {
     if (this.dead) return;
@@ -373,7 +374,7 @@ export class WebGL2RenderingContext_ {
   // -------- context
 
   getContextAttributes() { return this.dead ? null : { ...this.attrs }; }
-  isContextLost() { return false; }
+  isContextLost() { return this.dead; }
   makeXRCompatible() { return Promise.resolve(); }
   getSupportedExtensions() { return this.info.extensions.slice(); }
   getExtension(name: string): object | null {
@@ -381,37 +382,14 @@ export class WebGL2RenderingContext_ {
     if (have) return have;
     if (!this.info.extensions.includes(name)) return null;
     const e: Record<string, unknown> = { ...EXT_CONSTANTS[name] };
-    if (name === "WEBGL_lose_context") Object.assign(e, { loseContext() {}, restoreContext() {} });
+    // loseContext frees the context for good (three's forceContextLoss, R3F's unmount): nothing restores it
+    if (name === "WEBGL_lose_context") Object.assign(e, { loseContext: () => this._destroy(), restoreContext() {} });
     else if (name === "WEBGL_compressed_texture_astc") e.getSupportedProfiles = () => ["ldr"];
-    else if (name === "EXT_disjoint_timer_query_webgl2") e.queryCounterEXT = () => { throw todo("queryCounterEXT"); };
-    else if (name === "EXT_clip_control") e.clipControlEXT = () => { throw todo("clipControlEXT"); };
-    else if (name === "EXT_polygon_offset_clamp") e.polygonOffsetClampEXT = () => { throw todo("polygonOffsetClampEXT"); };
-    else if (name === "WEBGL_provoking_vertex") e.provokingVertexWEBGL = () => { throw todo("provokingVertexWEBGL"); };
-    else if (name === "WEBGL_multi_draw") Object.assign(e, this.multiDraw());
     this.exts.set(name, e);
     this.str2(OP.requestExtension, name);
     return e;
   }
-  private str2(op: number, s: string) { this.i32[this.r(1)] = op; this.str(s); }
-  /** WEBGL_multi_draw as a run of single draws */
-  private multiDraw() {
-    const gl = this;
-    const at = (l: Nums, o: number, k: number) => l[o + k];
-    return {
-      multiDrawArraysWEBGL(mode: number, firsts: Nums, fo: number, counts: Nums, co: number, n: number) {
-        for (let k = 0; k < n; k++) gl.drawArrays(mode, at(firsts, fo, k), at(counts, co, k));
-      },
-      multiDrawElementsWEBGL(mode: number, counts: Nums, co: number, type: number, offsets: Nums, oo: number, n: number) {
-        for (let k = 0; k < n; k++) gl.drawElements(mode, at(counts, co, k), type, at(offsets, oo, k));
-      },
-      multiDrawArraysInstancedWEBGL(mode: number, firsts: Nums, fo: number, counts: Nums, co: number, inst: Nums, io: number, n: number) {
-        for (let k = 0; k < n; k++) gl.drawArraysInstanced(mode, at(firsts, fo, k), at(counts, co, k), at(inst, io, k));
-      },
-      multiDrawElementsInstancedWEBGL(mode: number, counts: Nums, co: number, type: number, offsets: Nums, oo: number, inst: Nums, io: number, n: number) {
-        for (let k = 0; k < n; k++) gl.drawElementsInstanced(mode, at(counts, co, k), type, at(offsets, oo, k), at(inst, io, k));
-      },
-    };
-  }
+  private str2(op: number, s: string) { this.c0(op); this.str(s); }
   getError(): number {
     if (!(g.__raea_webgl_debug || this.debugEnv)) return 0;
     this.c0(OP.getError);
@@ -569,7 +547,7 @@ export class WebGL2RenderingContext_ {
   }
   private stOp(s: number[], f: number, zf: number, zp: number) { s[4] = f; s[5] = zf; s[6] = zp; }
   readBuffer(src: number) { this.c1(OP.readBuffer, src); }
-  drawBuffers(bufs: Nums) { this.i32[this.r(1)] = OP.drawBuffers; this.nums(bufs, I32); }
+  drawBuffers(bufs: Nums) { this.c0(OP.drawBuffers); this.nums(bufs, I32); }
   finish() { this.c0(OP.finish); }
   flush() { this.c0(OP.flush); }
 
@@ -636,7 +614,12 @@ export class WebGL2RenderingContext_ {
 
   // -------- bindings
 
+  /** o is null or a live object of this context: binding anything else is WebGL's INVALID_OPERATION, and the
+   *  binding stays as it was */
+  private bindable(o: WebGLObject_ | null | undefined): boolean { return o == null || this.mine(o); }
+
   bindBuffer(target: number, b: Buf) {
+    if (!this.bindable(b)) return;
     if (target === GL.ARRAY_BUFFER) this.arrayBuf = b;
     else if (target === GL.ELEMENT_ARRAY_BUFFER) { if (this.vao) this.vao._element = b; else this.elem0 = b; }
     else this.bufs[target] = b;
@@ -644,16 +627,19 @@ export class WebGL2RenderingContext_ {
     this.c2(OP.bindBuffer, target, b ? b.id : 0);
   }
   bindBufferBase(target: number, index: number, b: Buf) {
+    if (!this.bindable(b)) return;
     this.bufs[target] = b;
     if (b) b._bound = true;
     this.c3(OP.bindBufferBase, target, index, b ? b.id : 0);
   }
   bindBufferRange(target: number, index: number, b: Buf, offset: number, size: number) {
+    if (!this.bindable(b)) return;
     this.bufs[target] = b;
     if (b) b._bound = true;
     this.c5(OP.bindBufferRange, target, index, b ? b.id : 0, offset, size);
   }
   bindFramebuffer(target: number, f: Fb) {
+    if (!this.bindable(f)) return;
     if (target === GL.READ_FRAMEBUFFER) this.readFb = f;
     else if (target === GL.DRAW_FRAMEBUFFER) this.drawFb = f;
     else this.drawFb = this.readFb = f;
@@ -661,11 +647,13 @@ export class WebGL2RenderingContext_ {
     this.c2(OP.bindFramebuffer, target, f ? f.id : 0);
   }
   bindRenderbuffer(target: number, r: Rb) {
+    if (!this.bindable(r)) return;
     this.rb = r;
     if (r) r._bound = true;
     this.c2(OP.bindRenderbuffer, target, r ? r.id : 0);
   }
   bindTexture(target: number, t: Tex) {
+    if (!this.bindable(t)) return;
     const u = this.unit;
     switch (target) {
       case GL.TEXTURE_2D: this.t2d[u] = t; break;
@@ -676,13 +664,14 @@ export class WebGL2RenderingContext_ {
     if (t) t._bound = true;
     this.c2(OP.bindTexture, target, t ? t.id : 0);
   }
-  bindSampler(unit: number, s: WebGLSampler_ | null) { this.samplers[unit] = s; this.c2(OP.bindSampler, unit, s ? s.id : 0); }
+  bindSampler(unit: number, s: WebGLSampler_ | null) { if (!this.bindable(s)) return; this.samplers[unit] = s; this.c2(OP.bindSampler, unit, s ? s.id : 0); }
   bindVertexArray(v: WebGLVertexArrayObject_ | null) {
+    if (!this.bindable(v)) return;
     this.vao = v;
     if (v) v._bound = true;
     this.c1(OP.bindVertexArray, v ? v.id : 0);
   }
-  useProgram(p: Prog) { this.program = p; this.c1(OP.useProgram, p ? p.id : 0); }
+  useProgram(p: Prog) { if (!this.bindable(p)) return; this.program = p; this.c1(OP.useProgram, p ? p.id : 0); }
 
   // -------- buffers
 
@@ -693,7 +682,8 @@ export class WebGL2RenderingContext_ {
     this.i32[p] = OP.bufferData;
     this.i32[p + 1] = target;
     this.view(data, srcOffset, length);
-    this.i32[this.rc(1)] = usage;
+    const at = this.rc(1);
+    this.i32[at] = usage;
   }
   bufferSubData(target: number, dstByteOffset: number, data: View | ArrayBuffer, srcOffset = 0, length = 0) {
     if (data == null) return;
@@ -706,9 +696,12 @@ export class WebGL2RenderingContext_ {
   getBufferSubData(target: number, srcByteOffset: number, dst: View, dstOffset = 0, length = 0) {
     const bpe = (dst as { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT || 1;
     const off = dstOffset * bpe, len = length ? length * bpe : dst.byteLength - off;
+    if (off > dst.byteLength || len < 0 || off + len > dst.byteLength) {
+      throw new Error(`getBufferSubData: ${len} bytes from element ${dstOffset} don't fit a ${dst.byteLength}-byte destination`);
+    }
     this.c3(OP.getBufferSubData, target, srcByteOffset, len);
     const r = this._flush();
-    if (r instanceof ArrayBuffer) new Uint8Array(dst.buffer, dst.byteOffset + off, Math.min(len, r.byteLength)).set(new Uint8Array(r, 0, Math.min(len, r.byteLength)));
+    if (r instanceof ArrayBuffer) new Uint8Array(dst.buffer, dst.byteOffset + off, r.byteLength).set(new Uint8Array(r));
   }
 
   // -------- vertex attributes
@@ -853,7 +846,7 @@ export class WebGL2RenderingContext_ {
   private tex2D(target: number, level: number, ifmt: number, w: number, h: number, border: number, format: number, type: number, px: View | null, srcOffset: number) {
     this.cn(OP.texImage2D, target, level, ifmt, w, h, border, format, type, px ? 1 : 0);
     if (px) this.view(px, srcOffset);
-    else this.u32[this.rc(1)] = 0;
+    else this.zero();
   }
   /** A DOM source (or ImageData) uploaded: texImage2D (sub false: x is the internal format) or texSubImage2D. w/h 0
    *  mean the source's own size. */
@@ -897,13 +890,15 @@ export class WebGL2RenderingContext_ {
     if (sub) this.cn(OP.texSubImage2DSource, target, level, x, y, w, h, format, type, kind);
     else this.cn(OP.texImage2DSource, target, level, x, w, h, format, type, kind);
     this.str(ref);
+    // another WebGL canvas is read now, before its drawing buffer is cleared after its next snapshot
+    if (kind === 3) this._flush();
   }
   texImage3D(target: number, level: number, ifmt: number, w: number, h: number, d: number, border: number, format: number, type: number, src: View | null | number, srcOffset = 0) {
     if (typeof src === "number") throw todo("texImage3D from a PIXEL_UNPACK_BUFFER");
     if (src != null && !ArrayBuffer.isView(src)) throw todo(`texImage3D from ${what(src)}`);
     this.cn(OP.texImage3D, target, level, ifmt, w, h, d, border, format, type, src ? 1 : 0);
     if (src) this.view(src, srcOffset);
-    else this.u32[this.rc(1)] = 0;
+    else this.zero();
   }
   texSubImage3D(target: number, level: number, x: number, y: number, z: number, w: number, h: number, d: number, format: number, type: number, src: View | null | number, srcOffset = 0) {
     if (typeof src === "number") throw todo("texSubImage3D from a PIXEL_UNPACK_BUFFER");
@@ -959,7 +954,6 @@ export class WebGL2RenderingContext_ {
     if (!s) return null;
     if (pname === GL.DELETE_STATUS) return s._deleted;
     if (pname === GL.SHADER_TYPE) return s._type;
-    if (pname === COMPLETION_STATUS_KHR) return true;
     this.c2(OP.getShaderParameter, s.id, pname);
     const r = Number(this._flush());
     return pname === GL.COMPILE_STATUS ? !!r : r;
@@ -968,7 +962,6 @@ export class WebGL2RenderingContext_ {
     if (!p) return null;
     if (pname === GL.DELETE_STATUS) return p._deleted;
     if (pname === GL.ATTACHED_SHADERS) return p._shaders.length;
-    if (pname === COMPLETION_STATUS_KHR) return true;
     this.c2(OP.getProgramParameter, p.id, pname);
     const r = Number(this._flush());
     return pname === GL.LINK_STATUS || pname === GL.VALIDATE_STATUS ? !!r : r;
@@ -1081,8 +1074,9 @@ export class WebGL2RenderingContext_ {
     const r = this._flush();
     if (!(r instanceof ArrayBuffer)) return;
     const bpe = (dst as { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT || 1;
-    const off = dstOffset * bpe, n = Math.min(r.byteLength, dst.byteLength - off);
-    if (n > 0) new Uint8Array(dst.buffer, dst.byteOffset + off, n).set(new Uint8Array(r, 0, n));
+    const off = dstOffset * bpe, room = dst.byteLength - off;
+    if (r.byteLength > room) throw new Error(`readPixels: ${r.byteLength} bytes don't fit the ${Math.max(0, room)} left in the destination after element ${dstOffset}`);
+    new Uint8Array(dst.buffer, dst.byteOffset + off, r.byteLength).set(new Uint8Array(r));
   }
 }
 

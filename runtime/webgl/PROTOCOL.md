@@ -36,16 +36,19 @@ them). Use those; add no other crate.
   Missing: every `webgl.create` fails with `WebGL needs ANGLE: run scripts/fetch-angle.sh`. Nothing else is tried.
 - Display: `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE 0x3202, null, attrs)`. Linux:
   `EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203 = VULKAN 0x3450`, `EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE 0x3209 =
-  SWIFTSHADER 0x3487`, with `VK_ICD_FILENAMES` set to the folder's `vk_swiftshader_icd.json` before the first call.
-  macOS: type `METAL 0x3489`. `RAEA_ANGLE_BACKEND=metal|vulkan|swiftshader|opengl` overrides.
+  SWIFTSHADER 0x3487`. ANGLE points the Vulkan loader at the `vk_swiftshader_icd.json` beside it while it makes its
+  instance; nothing is set for the process, so Bevy's own wgpu device picks its own driver. macOS: type `METAL 0x3489`. `RAEA_ANGLE_BACKEND=metal|vulkan|swiftshader|opengl` overrides.
 - One display a process. One EGL context per WebGL context, ES 3.0, all in one share group, each made with
   `EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE 0x33AC = 1` (ANGLE then validates and translates shaders by the WebGL 2
   spec, as it does for Chrome) and `EGL_EXTENSIONS_ENABLED_ANGLE 0x345F = 0` (extensions come on only when the page
   asks: `requestExtension`). Also, as Chrome: `EGL_CONTEXT_OPENGL_BACKWARDS_COMPATIBLE_ANGLE 0x3483 = 0` (ES 3.0, not
   3.1), `EGL_CONTEXT_CLIENT_ARRAYS_ENABLED_ANGLE 0x3452 = 0` (an offset with no buffer bound is never read as a
   pointer), `EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE 0x3453 = 1` (textures and buffers start zeroed). A 1x1 pbuffer is the surface; drawing goes to our own framebuffer.
-- Drawing buffer (what `bindFramebuffer(target, null)` binds): an FBO of the canvas's size, RGBA8 color (RGB8 when
-  `alpha: false`), DEPTH24_STENCIL8 when `depth` or `stencil`. With `antialias: true` it is multisampled
+- Drawing buffer (what `bindFramebuffer(target, null)` binds): an FBO of the canvas's size clamped to the smallest of
+  MAX_RENDERBUFFER_SIZE, MAX_TEXTURE_SIZE and MAX_VIEWPORT_DIMS (as Chrome clamps it), RGBA8 color (RGB8 when
+  `alpha: false`), and as Chrome exposes them: DEPTH_COMPONENT24 on DEPTH_ATTACHMENT for `depth` alone,
+  STENCIL_INDEX8 on STENCIL_ATTACHMENT for `stencil` alone, DEPTH24_STENCIL8 for both, nothing for neither. A
+  resize makes the new buffers and checks them complete before it frees the old; when that fails the old stay. With `antialias: true` it is multisampled
   (min(4, MAX_SAMPLES)) and resolved into a single-sample FBO before anything reads it (`readPixels`,
   `copyTex*`, `blitFramebuffer` from null, snapshot, `readCanvas`, a texture upload from this canvas).
 - Scratch test, Linux, Chrome for Testing 140.0.7339.80: `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)),
@@ -56,15 +59,15 @@ them). Use those; add no other crate.
 `__raea_gl(bytes: Uint8Array, byteLength: number, ctx: number)` → `undefined | number | string | ArrayBuffer`.
 Installed on the React thread's engine with `JsEngine::native_bytes`. Runs every command in `bytes[..byteLength]` on
 context `ctx`, in order. Its value is the answer of the last command if that command has one. A GL or decode failure
-throws an Error naming the op.
+throws an Error naming the op, and so does a `byteLength` that isn't finite, is negative or is more than the bytes.
 
 Through `__raea_call` (JSON, runs on the same thread):
 
 | Call | Args | Answer |
 |---|---|---|
-| `webgl.create` | `{ width, height, attrs: { alpha, depth, stencil, antialias, premultipliedAlpha, preserveDrawingBuffer, powerPreference?, failIfMajorPerformanceCaveat?, desynchronized? } }` (attrs already defaulted by JS) | `{ ctx: number, info: Info }` |
-| `webgl.resize` | `{ ctx, width, height }` | `null` (the drawing buffer is remade and cleared) |
-| `webgl.destroy` | `{ ctx }` | `null` |
+| `webgl.create` | `{ width, height, attrs: { alpha, depth, stencil, antialias, premultipliedAlpha, preserveDrawingBuffer, powerPreference?, failIfMajorPerformanceCaveat?, desynchronized? } }` (attrs already defaulted by JS) | `{ ctx: number, info: Info, width: number, height: number }`: `width`/`height` the drawing buffer's, clamped (JS's `drawingBufferWidth`/`Height`) |
+| `webgl.resize` | `{ ctx, width, height }` | `{ width: number, height: number }`: the drawing buffer is remade at this size, clamped, and cleared |
+| `webgl.destroy` | `{ ctx }` | `null`. Sent when the canvas leaves the page and by `WEBGL_lose_context.loseContext()`; after it `isContextLost()` is true and every call is a no-op |
 
 `Info`: `{ version, shadingLanguageVersion, vendor, renderer, unmaskedVendor, unmaskedRenderer, extensions: string[]
 (WebGL names the page may get), params: Record<number, number | number[]> }`. `params` holds every constant limit
@@ -107,20 +110,24 @@ Ops that are not plain GL:
 - `pixelStorei`: `UNPACK_FLIP_Y_WEBGL 0x9240`, `UNPACK_PREMULTIPLY_ALPHA_WEBGL 0x9241` and
   `UNPACK_COLORSPACE_CONVERSION_WEBGL 0x9243` are kept in Rust (source.rs) and never reach GL; the rest go to GL.
 - `texImage2D(target, level, internalformat, width, height, border, format, type, hasPixels, pixels)`: `hasPixels`
-  0 is a null upload (the blob is empty). FLIP_Y and PREMULTIPLY apply to the bytes, as WebGL says.
+  0 is a null upload (the blob is empty). FLIP_Y and PREMULTIPLY apply to the bytes, as WebGL says: the rectangle
+  the UNPACK row length, alignment and skips select is cut out, flipped/premultiplied and uploaded tightly packed
+  (the page's UNPACK state put back after).
 - `texImage2DSource(target, level, internalformat, width, height, format, type, kind, ref)` and
   `texSubImage2DSource(target, level, xoffset, yoffset, width, height, format, type, kind, ref)`: a DOM source.
   `width`/`height` 0 means the source's own size. `kind` 1: an image, `ref` its URL as `image.read` gave it
   (`file://`, `data:`, http(s)), decoded in Rust and cached by URL. `kind` 2: a 2D canvas, `ref` the JSON
   `{ uid, width, height, __canvas2d }` that `canvas.read` takes (replayed in Rust by raea_sys_canvas). `kind` 3:
-  another WebGL canvas, `ref` its ctx id in decimal. `ImageData` and typed arrays go through `texImage2D`.
+  another WebGL canvas, `ref` its ctx id in decimal; JS sends it at once (flushes), so the source is read at the
+  call, before its drawing buffer is cleared after its next snapshot. `ImageData` and typed arrays go through `texImage2D`.
   Sources are straight-alpha RGBA8, top row first; FLIP_Y, PREMULTIPLY and the conversion to `format`/`type` are
   done in Rust (source.rs).
 - `requestExtension(name)`: the WebGL extension name; Rust enables the ANGLE extension(s) behind it.
 - `readPixels(x, y, width, height, format, type)`: the bytes as GL packs them under the PACK state (JS copies them
   into the caller's array at its dstOffset). From the drawing buffer it reads the resolved image.
 - `getParameter(pname)`: for what JS neither holds in `Info.params` nor tracks itself. JSON: a number, an array of
-  numbers, a string, or an object id as `{ "id": n }` is not needed (JS tracks every binding itself).
+  numbers, a string, or an object id as `{ "id": n }` is not needed (JS tracks every binding itself). Integers are
+  read only for the pnames known to answer one (exec.rs `SINGLE_INTEGERS`); any other pname answers `null`.
 - `getActiveUniform`/`getActiveAttrib`: `{ "name", "size", "type" }` or `null`.
 - `getShaderPrecisionFormat`: `{ "rangeMin", "rangeMax", "precision" }`.
 - `getError`: answers GL's error. JS answers 0 without a round trip unless `RAEA_WEBGL_DEBUG=1`, when Rust also
@@ -173,5 +180,5 @@ pub struct Unpack { pub flip_y: bool, pub premultiply: bool, pub colorspace: u32
 pub struct Pixels { pub width: u32, pub height: u32, pub data: Vec<u8> }   // RGBA8 straight, top row first
 pub fn load(kind: u32, reference: &str) -> Result<Pixels, String>;
 pub fn for_upload(px: &Pixels, unpack: &Unpack, format: u32, ty: u32) -> Result<Vec<u8>, String>; // tightly packed bytes for glTexImage2D
-pub fn flip_premultiply(bytes: &[u8], width: u32, height: u32, format: u32, ty: u32, unpack: &Unpack, alignment: u32, row_length: u32) -> Option<Vec<u8>>; // FLIP_Y / PREMULTIPLY on a typed-array upload; None: as is
+pub fn flip_premultiply(bytes: &[u8], width: u32, height: u32, format: u32, ty: u32, unpack: &Unpack, alignment: u32, row_length: u32, skip_pixels: u32, skip_rows: u32) -> Result<Option<Vec<u8>>, String>; // FLIP_Y / PREMULTIPLY on a typed-array upload: the rectangle the skips select, tightly packed; None: as is
 ```

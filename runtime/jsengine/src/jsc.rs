@@ -282,8 +282,7 @@ unsafe fn answer(ctx: Ctx, exception: *mut Val, r: Result<crate::Ret, String>) -
                 let mut exc: Val = std::ptr::null();
                 let buf = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, b as *mut u8 as *mut c_void, len, Some(free_bytes), len as *mut c_void, &mut exc);
                 if !exc.is_null() || buf.is_null() {
-                    // not made: the bytes are still ours
-                    drop(Box::from_raw(b));
+                    // the deallocator owns the bytes from the call on, made or not: they aren't freed here
                     if !exception.is_null() {
                         *exception = exc;
                     }

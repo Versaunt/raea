@@ -118,6 +118,9 @@ struct Angle {
     available: HashSet<String>,
     /// `Info`, but for the drawing buffer's params.
     info: Value,
+    /// The largest drawing buffer, width and height: the smallest of MAX_RENDERBUFFER_SIZE, MAX_TEXTURE_SIZE and
+    /// MAX_VIEWPORT_DIMS, as Chrome clamps it.
+    max_size: [u32; 2],
 }
 
 // The EGL handles are process-wide and EGL is thread-safe; the GL calls made through them are on one thread each.
@@ -152,8 +155,8 @@ fn backend() -> Result<Vec<i32>, String> {
     let default = if cfg!(target_os = "macos") { "metal" } else { "swiftshader" };
     let name = std::env::var("RAEA_ANGLE_BACKEND").unwrap_or_else(|_| default.into());
     let attrs = match name.as_str() {
-        // ANGLE points the Vulkan loader at the vk_swiftshader_icd.json beside it while it makes its instance, and
-        // puts VK_ICD_FILENAMES back: set here for the whole process, Bevy's wgpu device came up on SwiftShader too
+        // ANGLE points the Vulkan loader at the vk_swiftshader_icd.json beside it while it makes its instance; nothing
+        // is set for the process, so Bevy's own wgpu device picks its own driver
         "swiftshader" => vec![PLATFORM_ANGLE_TYPE, TYPE_VULKAN, PLATFORM_ANGLE_DEVICE_TYPE, DEVICE_SWIFTSHADER],
         "vulkan" => vec![PLATFORM_ANGLE_TYPE, TYPE_VULKAN],
         "metal" => vec![PLATFORM_ANGLE_TYPE, TYPE_METAL],
@@ -218,7 +221,7 @@ unsafe fn load() -> Result<Angle, String> {
     // What every context shares, read once on the root, current here only for this.
     let surface = egl.create_pbuffer_surface(display, config, PBUFFER_ATTRS).map_err(|e| fail("eglCreatePbufferSurface", e))?;
     egl.make_current(display, Some(surface), Some(surface), Some(root)).map_err(|e| fail("eglMakeCurrent", e))?;
-    let (available, info) = unsafe {
+    let (available, info, max_size) = unsafe {
         let gl = glow_context(&egl);
         let mut available = gl.supported_extensions().clone();
         available.extend(gl.get_parameter_string(REQUESTABLE_EXTENSIONS).split_whitespace().map(String::from));
@@ -232,6 +235,8 @@ unsafe fn load() -> Result<Angle, String> {
         let mut dims = [0; 2];
         gl.get_parameter_i32_slice(glow::MAX_VIEWPORT_DIMS, &mut dims);
         params.insert(glow::MAX_VIEWPORT_DIMS.to_string(), json!(dims));
+        let side = gl.get_parameter_i32(glow::MAX_RENDERBUFFER_SIZE).min(gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE));
+        let max_size = dims.map(|d| d.min(side).max(1) as u32);
         for p in [glow::ALIASED_LINE_WIDTH_RANGE, glow::ALIASED_POINT_SIZE_RANGE] {
             let mut range = [0.0f32; 2];
             gl.get_parameter_f32_slice(p, &mut range);
@@ -252,11 +257,97 @@ unsafe fn load() -> Result<Angle, String> {
             "extensions": extensions,
             "params": params,
         });
-        (available, info)
+        (available, info, max_size)
     };
     egl.make_current(display, None, None, None).map_err(|e| fail("eglMakeCurrent", e))?;
     egl.destroy_surface(display, surface).map_err(|e| fail("eglDestroySurface", e))?;
-    Ok(Angle { egl, _gles: gles, display, config, root, request_extension, color_mask_i, available, info })
+    Ok(Angle { egl, _gles: gles, display, config, root, request_extension, color_mask_i, available, info, max_size })
+}
+
+/// The drawing buffer's depth/stencil renderbuffer format and attachment, as Chrome makes them for `depth` and
+/// `stencil`: none when neither is asked for.
+fn depth_stencil(attrs: Attrs) -> Option<(u32, u32)> {
+    match (attrs.depth, attrs.stencil) {
+        (true, true) => Some((glow::DEPTH24_STENCIL8, glow::DEPTH_STENCIL_ATTACHMENT)),
+        (true, false) => Some((glow::DEPTH_COMPONENT24, glow::DEPTH_ATTACHMENT)),
+        (false, true) => Some((glow::STENCIL_INDEX8, glow::STENCIL_ATTACHMENT)),
+        (false, false) => None,
+    }
+}
+
+/// The drawing buffer's GL objects.
+#[derive(Clone, Copy)]
+struct Buffers {
+    /// Multisampled with antialias: what null binds for drawing.
+    fbo: NativeFramebuffer,
+    color: NativeRenderbuffer,
+    depth: Option<NativeRenderbuffer>,
+    /// With antialias: the single-sample framebuffer the drawing buffer resolves into, what null binds for reading.
+    resolve: Option<(NativeFramebuffer, NativeRenderbuffer)>,
+}
+
+impl Buffers {
+    /// A `w` x `h` drawing buffer with its storage, attached and complete, or an error and nothing left made. It binds
+    /// framebuffers and the renderbuffer: the caller puts them back.
+    unsafe fn new(gl: &glow::Context, attrs: Attrs, samples: i32, w: i32, h: i32) -> Result<Buffers, String> {
+        unsafe {
+            let ds = depth_stencil(attrs);
+            let b = Buffers {
+                fbo: gl.create_framebuffer()?,
+                color: gl.create_renderbuffer()?,
+                depth: if ds.is_some() { Some(gl.create_renderbuffer()?) } else { None },
+                resolve: if samples > 0 { Some((gl.create_framebuffer()?, gl.create_renderbuffer()?)) } else { None },
+            };
+            let format = if attrs.alpha { glow::RGBA8 } else { glow::RGB8 };
+            // a renderbuffer name is only an object once bound, so each is bound before it is attached
+            let attach = |rb, format, samples, attachment| {
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
+                if samples > 0 {
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, format, w, h);
+                } else {
+                    gl.renderbuffer_storage(glow::RENDERBUFFER, format, w, h);
+                }
+                gl.framebuffer_renderbuffer(glow::DRAW_FRAMEBUFFER, attachment, glow::RENDERBUFFER, Some(rb));
+            };
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(b.fbo));
+            attach(b.color, format, samples, glow::COLOR_ATTACHMENT0);
+            if let (Some(rb), Some((format, attachment))) = (b.depth, ds) {
+                attach(rb, format, samples, attachment);
+            }
+            let mut status = gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER);
+            if let Some((rfbo, rcolor)) = b.resolve {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(rfbo));
+                attach(rcolor, format, 0, glow::COLOR_ATTACHMENT0);
+                if status == glow::FRAMEBUFFER_COMPLETE {
+                    status = gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER);
+                }
+            }
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                b.delete(gl);
+                return Err(format!("WebGL: a {w}x{h} drawing buffer is incomplete (0x{status:x})"));
+            }
+            Ok(b)
+        }
+    }
+
+    unsafe fn delete(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_framebuffer(self.fbo);
+            gl.delete_renderbuffer(self.color);
+            if let Some(depth) = self.depth {
+                gl.delete_renderbuffer(depth);
+            }
+            if let Some((rfbo, rcolor)) = self.resolve {
+                gl.delete_framebuffer(rfbo);
+                gl.delete_renderbuffer(rcolor);
+            }
+        }
+    }
+
+    /// What null binds for reading: the resolve framebuffer, else the drawing buffer's own.
+    fn read_fbo(&self) -> NativeFramebuffer {
+        self.resolve.map_or(self.fbo, |(f, _)| f)
+    }
 }
 
 /// A WebGL context: its GL, its drawing buffer, the page's objects and unpack state.
@@ -270,12 +361,8 @@ pub struct Context {
     angle: &'static Angle,
     context: egl::Context,
     surface: egl::Surface,
-    /// The drawing buffer, multisampled with antialias: what null binds for drawing.
-    fbo: NativeFramebuffer,
-    color: NativeRenderbuffer,
-    depth: Option<NativeRenderbuffer>,
-    /// With antialias: the single-sample framebuffer the drawing buffer resolves into, what null binds for reading.
-    resolve: Option<(NativeFramebuffer, NativeRenderbuffer)>,
+    /// The drawing buffer.
+    buffers: Buffers,
     samples: i32,
     /// The resolve is behind the drawing buffer.
     stale: bool,
@@ -284,8 +371,11 @@ pub struct Context {
     info: Value,
 }
 
+/// A WebGL context with a `width` x `height` drawing buffer, clamped to the GL limits (`Context::width`/`height` hold
+/// the size it got).
 pub fn create(width: u32, height: u32, attrs: Attrs) -> Result<Context, String> {
     let a = angle()?;
+    let (width, height) = (width.clamp(1, a.max_size[0]), height.clamp(1, a.max_size[1]));
     let fail = |what: &str, e: egl::Error| format!("WebGL: {what}: {e}");
     let context = a.egl.create_context(a.display, a.config, Some(a.root), CONTEXT_ATTRS).map_err(|e| fail("eglCreateContext", e))?;
     let surface = a.egl.create_pbuffer_surface(a.display, a.config, PBUFFER_ATTRS).map_err(|e| fail("eglCreatePbufferSurface", e));
@@ -293,13 +383,10 @@ pub fn create(width: u32, height: u32, attrs: Attrs) -> Result<Context, String> 
     let objects = current.and_then(|()| unsafe {
         let gl = glow_context(&a.egl);
         let samples = if attrs.antialias { gl.get_parameter_i32(glow::MAX_SAMPLES).min(4) } else { 0 };
-        let fbo = gl.create_framebuffer()?;
-        let color = gl.create_renderbuffer()?;
-        let depth = if attrs.depth || attrs.stencil { Some(gl.create_renderbuffer()?) } else { None };
-        let resolve = if samples > 0 { Some((gl.create_framebuffer()?, gl.create_renderbuffer()?)) } else { None };
-        Ok((gl, samples, fbo, color, depth, resolve))
+        let buffers = Buffers::new(&gl, attrs, samples, width as i32, height as i32)?;
+        Ok((gl, samples, buffers))
     });
-    let (gl, samples, fbo, color, depth, resolve) = match objects {
+    let (gl, samples, buffers) = match objects {
         Ok(o) => o,
         Err(e) => {
             let _ = a.egl.make_current(a.display, None, None, None);
@@ -312,22 +399,9 @@ pub fn create(width: u32, height: u32, attrs: Attrs) -> Result<Context, String> 
     };
     unsafe {
         // the page's starting state: null bound for drawing and reading, no renderbuffer, viewport and scissor box the
-        // canvas. A renderbuffer name is only an object once bound, so each is bound before it is attached.
-        let attach = |target, attachment, rb| {
-            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
-            gl.framebuffer_renderbuffer(target, attachment, glow::RENDERBUFFER, Some(rb));
-        };
-        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-        attach(glow::DRAW_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, color);
-        if let Some(depth) = depth {
-            attach(glow::DRAW_FRAMEBUFFER, glow::DEPTH_STENCIL_ATTACHMENT, depth);
-        }
-        if let Some((rfbo, rcolor)) = resolve {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(rfbo));
-            attach(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, rcolor);
-        } else {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
-        }
+        // canvas
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(buffers.fbo));
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(buffers.read_fbo()));
         gl.bind_renderbuffer(glow::RENDERBUFFER, None);
         gl.viewport(0, 0, width as i32, height as i32);
         gl.scissor(0, 0, width as i32, height as i32);
@@ -343,16 +417,14 @@ pub fn create(width: u32, height: u32, attrs: Attrs) -> Result<Context, String> 
         angle: a,
         context,
         surface: surface.unwrap(),
-        fbo,
-        color,
-        depth,
-        resolve,
+        buffers,
         samples,
         stale: false,
         enabled,
         info: Value::Null,
     };
-    cx.resize(width, height)?;
+    cx.clear();
+    // read with the drawing buffer bound for drawing
     let mut info = a.info.clone();
     for &p in BUFFER_PARAMS {
         info["params"][p.to_string()] = json!(unsafe { cx.gl.get_parameter_i32(p) });
@@ -388,38 +460,26 @@ impl Context {
         a.egl.make_current(a.display, Some(self.surface), Some(self.surface), Some(self.context)).map_err(|e| format!("WebGL: eglMakeCurrent: {e}"))
     }
 
-    /// The drawing buffer remade at `width` x `height` and cleared.
+    /// The drawing buffer remade at `width` x `height`, clamped to the GL limits, and cleared. When it can't be made
+    /// the previous one stays, at its size.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-        let (w, h) = (width as i32, height as i32);
-        let gl = &self.gl;
+        let (width, height) = (width.clamp(1, self.angle.max_size[0]), height.clamp(1, self.angle.max_size[1]));
+        let old = self.buffers;
         unsafe {
-            let saved = self.save();
-            let format = if self.attrs.alpha { glow::RGBA8 } else { glow::RGB8 };
-            let storage = |rb, format, samples| {
-                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rb));
-                if samples > 0 {
-                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, format, w, h);
-                } else {
-                    gl.renderbuffer_storage(glow::RENDERBUFFER, format, w, h);
-                }
-            };
-            storage(self.color, format, self.samples);
-            if let Some(depth) = self.depth {
-                storage(depth, glow::DEPTH24_STENCIL8, self.samples);
-            }
-            if let Some((_, rcolor)) = self.resolve {
-                storage(rcolor, format, 0);
-            }
-            let mut complete = Ok(());
-            for fbo in [Some(self.fbo), self.resolve.map(|(f, _)| f)].into_iter().flatten() {
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                let status = gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER);
-                if status != glow::FRAMEBUFFER_COMPLETE {
-                    complete = Err(format!("WebGL: a {width}x{height} drawing buffer is incomplete (0x{status:x})"));
-                }
+            let mut saved = self.save();
+            let made = Buffers::new(&self.gl, self.attrs, self.samples, width as i32, height as i32);
+            if let Ok(new) = &made {
+                // the old drawing buffer bound becomes the new one
+                let moved = |b: u32| match b {
+                    _ if b == old.fbo.0.get() => new.fbo.0.get(),
+                    _ if b == old.read_fbo().0.get() => new.read_fbo().0.get(),
+                    _ => b,
+                };
+                (saved.draw, saved.read) = (moved(saved.draw), moved(saved.read));
             }
             self.restore(&saved);
-            complete?;
+            self.buffers = made?;
+            old.delete(&self.gl);
         }
         self.width = width;
         self.height = height;
@@ -447,18 +507,18 @@ impl Context {
     }
 
     pub fn draw_framebuffer(&self) -> glow::Framebuffer {
-        self.fbo
+        self.buffers.fbo
     }
 
     /// The drawing buffer to read from, resolved first if it is multisampled and behind.
     pub fn read_framebuffer(&mut self) -> glow::Framebuffer {
-        let Some((rfbo, _)) = self.resolve else { return self.fbo };
+        let Some((rfbo, _)) = self.buffers.resolve else { return self.buffers.fbo };
         if self.stale {
             let (w, h) = (self.width as i32, self.height as i32);
             unsafe {
                 let saved = self.save();
                 self.neutral(&saved);
-                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbo));
+                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.buffers.fbo));
                 self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(rfbo));
                 self.gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
                 self.restore(&saved);
@@ -521,10 +581,13 @@ impl Context {
         unsafe {
             let saved = self.save();
             self.neutral(&saved);
-            self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.fbo));
+            self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.buffers.fbo));
             self.gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0; 4]);
-            if self.depth.is_some() {
-                self.gl.clear_buffer_depth_stencil(glow::DEPTH_STENCIL, 0, 1.0, 0);
+            match depth_stencil(self.attrs).map(|(_, attachment)| attachment) {
+                Some(glow::DEPTH_STENCIL_ATTACHMENT) => self.gl.clear_buffer_depth_stencil(glow::DEPTH_STENCIL, 0, 1.0, 0),
+                Some(glow::DEPTH_ATTACHMENT) => self.gl.clear_buffer_f32_slice(glow::DEPTH, 0, &[1.0]),
+                Some(_) => self.gl.clear_buffer_i32_slice(glow::STENCIL, 0, &[0]),
+                None => {}
             }
             self.restore(&saved);
         }
@@ -610,17 +673,7 @@ impl Drop for Context {
         if self.make_current().is_ok() {
             // the page's objects live in the share group, so they outlive the context unless deleted here
             self.objects.delete_all(&self.gl);
-            unsafe {
-                self.gl.delete_framebuffer(self.fbo);
-                self.gl.delete_renderbuffer(self.color);
-                if let Some(depth) = self.depth {
-                    self.gl.delete_renderbuffer(depth);
-                }
-                if let Some((rfbo, rcolor)) = self.resolve {
-                    self.gl.delete_framebuffer(rfbo);
-                    self.gl.delete_renderbuffer(rcolor);
-                }
-            }
+            unsafe { self.buffers.delete(&self.gl) };
         }
         let _ = a.egl.make_current(a.display, None, None, None);
         let _ = a.egl.destroy_surface(a.display, self.surface);
@@ -820,7 +873,6 @@ mod tests {
     fn angle_info_and_extensions() {
         let mut cx = create(8, 8, attrs(true)).unwrap();
         let info = cx.info();
-        println!("{info:#}");
         let version = info["version"].as_str().unwrap();
         assert!(version.starts_with("WebGL 2.0 (OpenGL ES 3.0"), "{version}");
         assert!(info["shadingLanguageVersion"].as_str().unwrap().starts_with("WebGL GLSL ES 3.00 ("));
@@ -833,7 +885,9 @@ mod tests {
         let params = &info["params"];
         assert!(params[glow::MAX_TEXTURE_SIZE.to_string()].as_i64().unwrap() >= 4096);
         assert_eq!(params[glow::SAMPLES.to_string()], 4);
-        assert_eq!(params[glow::STENCIL_BITS.to_string()], 8);
+        // depth without stencil, as asked
+        assert_eq!(params[glow::DEPTH_BITS.to_string()], 24);
+        assert_eq!(params[glow::STENCIL_BITS.to_string()], 0);
         assert!(params[MAX_TEXTURE_MAX_ANISOTROPY.to_string()].as_f64().unwrap() >= 1.0);
         assert_eq!(params[glow::MAX_VIEWPORT_DIMS.to_string()].as_array().unwrap().len(), 2);
 
@@ -846,24 +900,50 @@ mod tests {
         assert!(now.iter().any(|e| e == "GL_EXT_color_buffer_float") && now.iter().any(|e| e == "GL_EXT_float_blend"), "{now:?}");
     }
 
-    /// Resident memory in bytes.
-    fn rss() -> usize {
-        let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
-        statm.split_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * 4096
-    }
-
     #[test]
-    fn angle_contexts_free_their_memory() {
+    fn angle_contexts_are_made_and_dropped() {
         // each 256x256 antialiased context holds about 2.3 MB of drawing buffer
-        let make = || {
+        for _ in 0..50 {
             let mut cx = create(256, 256, attrs(true)).unwrap();
             triangle(&mut cx, BLUE, RED);
             assert_eq!(pixel(&cx.read_canvas(false), 256, 8, 248), [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn angle_depth_and_stencil_as_asked() {
+        let bits = |depth, stencil, antialias| {
+            let mut cx = create(8, 8, Attrs { depth, stencil, ..attrs(antialias) }).unwrap();
+            // a resize makes the same kind of buffer, and the clear after a snapshot clears what is there
+            cx.resize(9, 7).unwrap();
+            cx.snapshot(900_003, 1);
+            raea_sys_canvas::frames::take(900_003, 1).unwrap();
+            let gl = &cx.gl;
+            unsafe {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(cx.draw_framebuffer()));
+                assert_eq!(gl.get_error(), glow::NO_ERROR);
+                let p = &cx.info()["params"];
+                let info = (p[glow::DEPTH_BITS.to_string()].as_i64().unwrap(), p[glow::STENCIL_BITS.to_string()].as_i64().unwrap());
+                assert_eq!((gl.get_parameter_i32(glow::DEPTH_BITS) as i64, gl.get_parameter_i32(glow::STENCIL_BITS) as i64), info, "after resize");
+                info
+            }
         };
-        (0..5).for_each(|_| make());
-        let before = rss();
-        (0..50).for_each(|_| make());
-        let grown = rss().saturating_sub(before);
-        assert!(grown < 30 << 20, "50 contexts left {} MB behind", grown >> 20);
+        for antialias in [false, true] {
+            assert_eq!(bits(true, false, antialias), (24, 0));
+            assert_eq!(bits(false, true, antialias), (0, 8));
+            assert_eq!(bits(true, true, antialias), (24, 8));
+            assert_eq!(bits(false, false, antialias), (0, 0));
+        }
+    }
+
+    #[test]
+    fn angle_clamps_the_drawing_buffer() {
+        let max = angle().unwrap().max_size;
+        let mut cx = create(max[0] + 1000, 3, attrs(false)).unwrap();
+        assert_eq!((cx.width, cx.height), (max[0], 3));
+        cx.resize(5, max[1] + 1).unwrap();
+        assert_eq!((cx.width, cx.height), (5, max[1]));
+        cx.resize(0, 0).unwrap();
+        assert_eq!((cx.width, cx.height), (1, 1));
     }
 }

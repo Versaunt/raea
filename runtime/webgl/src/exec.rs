@@ -99,7 +99,7 @@ impl Layout {
         Layout { image_height: 0, skip_images: 0, ..self }
     }
 
-    /// The bytes GL touches for a `w` x `h` x `d` image of `bpp`-byte pixels, None past 2 GiB.
+    /// The bytes GL touches for a `w` x `h` x `d` image of `bpp`-byte pixels, None past 2 GiB (or past u64).
     fn size(&self, w: i32, h: i32, d: i32, bpp: usize) -> Option<usize> {
         if w <= 0 || h <= 0 || d <= 0 {
             return Some(0);
@@ -107,11 +107,12 @@ impl Layout {
         let (w, h, d, bpp) = (w as u64, h as u64, d as u64, bpp as u64);
         let a = self.alignment.max(1) as u64;
         let row_length = if self.row_length > 0 { self.row_length as u64 } else { w };
-        let stride = (row_length * bpp).div_ceil(a) * a;
+        let stride = row_length.checked_mul(bpp)?.div_ceil(a).checked_mul(a)?;
         let rows = if self.image_height > 0 { self.image_height as u64 } else { h };
-        let n = (self.skip_images.max(0) as u64 + d - 1) * rows * stride
-            + (self.skip_rows.max(0) as u64 + h - 1) * stride
-            + (self.skip_pixels.max(0) as u64 + w) * bpp;
+        let images = (self.skip_images.max(0) as u64 + d - 1).checked_mul(rows)?.checked_mul(stride)?;
+        let lines = (self.skip_rows.max(0) as u64 + h - 1).checked_mul(stride)?;
+        let last = (self.skip_pixels.max(0) as u64 + w).checked_mul(bpp)?;
+        let n = images.checked_add(lines)?.checked_add(last)?;
         usize::try_from(n).ok().filter(|&n| n <= 1 << 31)
     }
 }
@@ -270,11 +271,25 @@ fn unpack_bytes<'a>(cx: &Context, blob: &'a [u8], w: i32, h: i32, d: Option<i32>
     if d.is_some() {
         return Err("UNPACK_FLIP_Y_WEBGL or UNPACK_PREMULTIPLY_ALPHA_WEBGL set for a 3D upload from an array (INVALID_OPERATION in WebGL 2)".into());
     }
-    let (alignment, row_length) = (cx.objects.unpack.alignment as u32, cx.objects.unpack.row_length as u32);
-    Ok(match source::flip_premultiply(blob, w as u32, h as u32, format, ty, &cx.unpack, alignment, row_length) {
+    let l = cx.objects.unpack;
+    let (alignment, row_length, skip_pixels, skip_rows) = (l.alignment as u32, l.row_length as u32, l.skip_pixels as u32, l.skip_rows as u32);
+    Ok(match source::flip_premultiply(blob, w as u32, h as u32, format, ty, &cx.unpack, alignment, row_length, skip_pixels, skip_rows)? {
         Some(v) => Cow::Owned(v),
         None => Cow::Borrowed(blob),
     })
+}
+
+/// A 2D upload from a typed array: its bytes as given (under the page's UNPACK state), or flipped/premultiplied bytes
+/// cut to the image and tightly packed (uploaded under a tight UNPACK state, the page's put back after).
+fn upload_2d(cx: &Context, data: Option<&Cow<[u8]>>, call: impl FnOnce(&glow::Context, Option<&[u8]>)) {
+    let tight = matches!(data, Some(Cow::Owned(_)));
+    if tight {
+        tight_unpack(cx, true);
+    }
+    call(&cx.gl, data.map(|d| &**d));
+    if tight {
+        tight_unpack(cx, false);
+    }
 }
 
 /// A DOM source's pixels for texImage2DSource / texSubImage2DSource, cut to `w` x `h` (0: the source's size) and
@@ -324,8 +339,27 @@ fn canvas_pixels(cx: &mut Context, id: u32, reference: &str) -> Result<Pixels, S
     read
 }
 
-/// getParameter's answer for any pname: strings, the array-valued and float/bool pnames by table, else an integer.
-/// A pname GL refuses answers null.
+/// The getParameter pnames that answer one integer: ES 3.0's and those of the extensions a page may turn on
+/// (WEBGL_clip_cull_distance).
+#[rustfmt::skip]
+const SINGLE_INTEGERS: &[u32] = &[
+    0x84E0, 0x0D55, 0x8894, 0x80CA, 0x80C8, 0x883D, 0x8009, 0x80CB, 0x80C9, 0x0D54, 0x8F36, 0x8F37, 0x0B45, 0x8B8D,
+    0x0D56, 0x0B74, 0x8CA6, 0x8895, 0x8B8B, 0x0B46, 0x8192, 0x0D53, 0x8B9B, 0x8B9A, 0x821B, 0x8073, 0x88FF, 0x8CDF,
+    0x8B4D, 0x8A2E, 0x851C, 0x8824, 0x80E9, 0x80E8, 0x9125, 0x8A2D, 0x8B49, 0x8DFD, 0x8905, 0x84E8, 0x8D57, 0x8872,
+    0x0D33, 0x8C8A, 0x8C8B, 0x8C80, 0x8A2F, 0x8B4B, 0x8DFC, 0x8869, 0x8B4C, 0x9122, 0x8A2B, 0x8B4A, 0x8DFB, 0x8904,
+    0x821C, 0x86A2, 0x821D, 0x87FE, 0x8DF9, 0x0D05, 0x0D02, 0x0D04, 0x0D03, 0x88ED, 0x88EF, 0x0C02, 0x8CAA, 0x0D52,
+    0x8CA7, 0x80A8, 0x80A9, 0x8919, 0x8801, 0x8800, 0x8802, 0x8803, 0x8CA3, 0x0D57, 0x0B91, 0x0B94, 0x0B92, 0x0B95,
+    0x0B96, 0x0B97, 0x0D50, 0x8069, 0x8C1D, 0x806A, 0x8514, 0x8E25, 0x8C8F, 0x8A28, 0x8A34, 0x0CF5, 0x806E, 0x0CF2,
+    0x806D, 0x0CF4, 0x0CF3, 0x85B5,
+    // DRAW_BUFFER0..15
+    0x8825, 0x8826, 0x8827, 0x8828, 0x8829, 0x882A, 0x882B, 0x882C, 0x882D, 0x882E, 0x882F, 0x8830, 0x8831, 0x8832,
+    0x8833, 0x8834,
+    // MAX_CLIP_DISTANCES, MAX_CULL_DISTANCES, MAX_COMBINED_CLIP_AND_CULL_DISTANCES
+    0x0D32, 0x82F9, 0x82FA,
+];
+
+/// getParameter's answer for any pname: strings, the array-valued and float/bool pnames by table, the one-integer
+/// pnames of SINGLE_INTEGERS; anything else, or a pname GL refuses, answers null.
 fn parameter(cx: &mut Context, pname: u32) -> Value {
     if cx.objects.error == 0 {
         cx.objects.error = unsafe { cx.gl.get_error() };
@@ -375,7 +409,12 @@ fn parameter(cx: &mut Context, pname: u32) -> Value {
             0x8D6B | 0x9111 | 0x8A30 | 0x8A31 | 0x8A33 => json!(gl.get_parameter_i64(pname)),
             // STENCIL_WRITEMASK, STENCIL_BACK_WRITEMASK, STENCIL_VALUE_MASK, STENCIL_BACK_VALUE_MASK
             0x0B98 | 0x8CA5 | 0x0B93 | 0x8CA4 => json!(gl.get_parameter_i32(pname) as u32),
-            _ => json!(gl.get_parameter_i32(pname)),
+            _ if SINGLE_INTEGERS.contains(&pname) => json!(gl.get_parameter_i32(pname)),
+            // anything else may answer more than one value: WebGL's INVALID_ENUM, never a one-value read
+            _ => {
+                cx.objects.raise(INVALID_ENUM);
+                return Value::Null;
+            }
         }
     };
     let e = unsafe { cx.gl.get_error() };
@@ -730,7 +769,7 @@ fn command(cx: &mut Context, id: u32, op: u32, r: &mut Reader) -> Result<Ret, St
             ops::TEX_IMAGE2_D => {
                 let (target, level, internal, w, h, border, format, ty, has, blob) = (r.u()?, r.i()?, r.i()?, r.i()?, r.i()?, r.i()?, r.u()?, r.u()?, r.bool()?, r.b()?);
                 let data = if has { Some(unpack_bytes(cx, blob, w, h, None, format, ty)?) } else { None };
-                cx.gl.tex_image_2d(target, level, internal, w, h, border, format, ty, PixelUnpackData::Slice(data.as_deref()))
+                upload_2d(cx, data.as_ref(), |gl, d| gl.tex_image_2d(target, level, internal, w, h, border, format, ty, PixelUnpackData::Slice(d)))
             }
             ops::TEX_IMAGE2_DSOURCE => {
                 let (target, level, internal, w, h, format, ty, kind, reference) = (r.u()?, r.i()?, r.i()?, r.i()?, r.i()?, r.u()?, r.u()?, r.u()?, r.s()?);
@@ -751,7 +790,7 @@ fn command(cx: &mut Context, id: u32, op: u32, r: &mut Reader) -> Result<Ret, St
             ops::TEX_SUB_IMAGE2_D => {
                 let (target, level, x, y, w, h, format, ty, blob) = (r.u()?, r.i()?, r.i()?, r.i()?, r.i()?, r.i()?, r.u()?, r.u()?, r.b()?);
                 let data = unpack_bytes(cx, blob, w, h, None, format, ty)?;
-                cx.gl.tex_sub_image_2d(target, level, x, y, w, h, format, ty, PixelUnpackData::Slice(Some(&data)))
+                upload_2d(cx, Some(&data), |gl, d| gl.tex_sub_image_2d(target, level, x, y, w, h, format, ty, PixelUnpackData::Slice(d)))
             }
             ops::TEX_SUB_IMAGE2_DSOURCE => {
                 let (target, level, x, y, w, h, format, ty, kind, reference) = (r.u()?, r.i()?, r.i()?, r.i()?, r.i()?, r.i()?, r.u()?, r.u()?, r.u()?, r.s()?);
@@ -1189,6 +1228,37 @@ mod tests {
         c.op(ops::PIXEL_STOREI).u(0x0D05).i(8).op(ops::READ_PIXELS).i(0).i(0).i(1).i(2).u(RGBA).u(UNSIGNED_BYTE);
         let px = bytes(c.run(&mut cx));
         assert_eq!((px.len(), &px[8..12]), (12, &[255u8, 0, 0, 255][..]));
+    }
+
+    #[test]
+    fn exec_flip_y_with_skips_uploads_the_rectangle() {
+        let mut cx = context(false);
+        // a 3x3 RGBA array, pixel (x, y) = [100x, 100y, 0, 255], top row first
+        let mut img = Vec::new();
+        for y in 0..3u8 {
+            for x in 0..3u8 {
+                img.extend([x * 100, y * 100, 0, 255]);
+            }
+        }
+        let mut c = Cmds::default();
+        // ROW_LENGTH 3, SKIP_PIXELS 1, SKIP_ROWS 1, FLIP_Y: the 2x2 from (1, 1), its bottom row first
+        c.op(ops::PIXEL_STOREI).u(0x0CF2).i(3).op(ops::PIXEL_STOREI).u(0x0CF4).i(1).op(ops::PIXEL_STOREI).u(0x0CF3).i(1).op(ops::PIXEL_STOREI).u(0x9240).i(1);
+        c.op(ops::CREATE_TEXTURE).u(1).op(ops::BIND_TEXTURE).u(TEXTURE_2D).u(1);
+        c.op(ops::TEX_IMAGE2_D).u(TEXTURE_2D).i(0).i(RGBA8 as i32).i(2).i(2).i(0).u(RGBA).u(UNSIGNED_BYTE).u(1).b(&img);
+        c.op(ops::CREATE_FRAMEBUFFER).u(1).op(ops::BIND_FRAMEBUFFER).u(FRAMEBUFFER).u(1).op(ops::FRAMEBUFFER_TEXTURE2_D).u(FRAMEBUFFER).u(COLOR_ATTACHMENT0).u(TEXTURE_2D).u(1).i(0);
+        c.op(ops::READ_PIXELS).i(0).i(0).i(2).i(2).u(RGBA).u(UNSIGNED_BYTE);
+        let px = bytes(c.run(&mut cx));
+        assert_eq!(px, [100, 200, 0, 255, 200, 200, 0, 255, 100, 100, 0, 255, 200, 100, 0, 255]);
+        // texSubImage2D the same way: the 1x1 at SKIP_PIXELS 0, SKIP_ROWS 2 into (1, 1)
+        c.op(ops::PIXEL_STOREI).u(0x0CF4).i(0).op(ops::PIXEL_STOREI).u(0x0CF3).i(2);
+        c.op(ops::TEX_SUB_IMAGE2_D).u(TEXTURE_2D).i(0).i(1).i(1).i(1).i(1).u(RGBA).u(UNSIGNED_BYTE).b(&img);
+        c.op(ops::READ_PIXELS).i(1).i(1).i(1).i(1).u(RGBA).u(UNSIGNED_BYTE);
+        assert_eq!(bytes(c.run(&mut cx)), [0, 200, 0, 255]);
+        // the page's UNPACK state is back
+        unsafe {
+            assert_eq!((cx.gl.get_parameter_i32(0x0CF2), cx.gl.get_parameter_i32(0x0CF3), cx.gl.get_parameter_i32(0x0CF5)), (3, 2, 4));
+        }
+        assert_eq!(num(c.op(ops::GET_ERROR).run(&mut cx)), 0.0);
     }
 
     #[test]

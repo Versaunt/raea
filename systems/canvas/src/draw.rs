@@ -110,7 +110,12 @@ impl Ctx<'_> {
         let clip = clip_of(st, w, h);
         let shadow = st.get("shadow").filter(|s| !s.is_null());
         let filters = st.get("filter").and_then(Value::as_array).filter(|l| !l.is_empty());
-        if shadow.is_none() && filters.is_none() && clip.is_none() && matches!(mode, sk::BlendMode::SourceOver | sk::BlendMode::DestinationOut | sk::BlendMode::DestinationOver | sk::BlendMode::Plus | sk::BlendMode::Multiply | sk::BlendMode::Screen) {
+        // a mode that leaves the bitmap as it is where the shape isn't (all but copy, source-in, source-out,
+        // destination-in and destination-atop) is drawn straight on it, as Chrome draws it: a layer the bitmap's size
+        // for each call cost a whole-bitmap composite per call (06-opuscar's paper grain: thousands of 1-3 px
+        // source-atop rects on a 1024x1180 canvas, minutes a canvas)
+        let bounded = !matches!(mode, sk::BlendMode::Source | sk::BlendMode::SourceIn | sk::BlendMode::SourceOut | sk::BlendMode::DestinationIn | sk::BlendMode::DestinationAtop | sk::BlendMode::Clear);
+        if shadow.is_none() && filters.is_none() && clip.is_none() && bounded {
             paint.blend_mode = mode;
             draw(pm, &paint);
             return;
@@ -148,13 +153,23 @@ impl Ctx<'_> {
             Some("right") => "end",
             _ => "start",
         };
-        let base = match a[7].as_str() {
-            Some("top") => "text-before-edge",
-            Some("hanging") => "hanging",
-            Some("middle") => "middle",
-            Some("bottom") => "text-after-edge",
-            Some("ideographic") => "ideographic",
-            _ => "alphabetic",
+        // top, middle and bottom: the alphabetic baseline moved by the em box (measure.rs em_box), as Chrome places
+        // them. SVG's middle is half the x-height and its edges the unscaled ascent and descent, which differ
+        let em = match a[7].as_str() {
+            Some("top" | "middle" | "bottom") => crate::measure::em_box(self.opt, font),
+            _ => None,
+        };
+        let size = font["size"].as_f64().unwrap_or(10.0);
+        let (base, dy) = match (a[7].as_str(), em) {
+            (Some("top"), Some((asc, _))) => ("alphabetic", asc * size),
+            (Some("middle"), Some((asc, desc))) => ("alphabetic", (asc - desc) / 2.0 * size),
+            (Some("bottom"), Some((_, desc))) => ("alphabetic", -desc * size),
+            (Some("top"), None) => ("text-before-edge", 0.0),
+            (Some("hanging"), _) => ("hanging", 0.0),
+            (Some("middle"), None) => ("middle", 0.0),
+            (Some("bottom"), None) => ("text-after-edge", 0.0),
+            (Some("ideographic"), _) => ("ideographic", 0.0),
+            _ => ("alphabetic", 0.0),
         };
         let escape = |s: &str| {
             let mut e = String::new();
@@ -187,7 +202,7 @@ impl Ctx<'_> {
         let doc = format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\"><text x=\"{}\" y=\"{}\" font-size=\"{}\" font-family=\"{fam}\" font-weight=\"{}\" font-style=\"{}\" text-anchor=\"{anchor}\" dominant-baseline=\"{base}\" {paint_attr}>{esc}</text></svg>",
             f(&a[3]),
-            f(&a[4]),
+            f(&a[4]) + dy as f32,
             f(&font["size"]),
             font["weight"].as_str().unwrap_or("400"),
             font["style"].as_str().unwrap_or("normal"),

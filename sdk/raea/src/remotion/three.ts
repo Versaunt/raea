@@ -8,9 +8,12 @@
 //
 // Time: R3F's clock is the frame's, local frame / fps, never the wall clock. The scene steps frame by frame from 0 as
 // it plays, as raea's R3F reader does (sdk/r3f session.ts), so state a useFrame keeps is the same whichever frame came
-// before: a frame ahead of the last one (a render of one frame, a jump) steps through the frames between with three's
-// drawing turned off (React and useFrame run, gl.render and gl.clear do nothing) and draws only the frame asked for;
-// one behind it (a seek, a scrub) starts the scene again from frame 0 the same way, on the same renderer.
+// before: the next frame (playing) goes on from the last one; any other (a render of one frame, a jump ahead, a seek
+// back) starts the scene again from frame 0 and steps to it with three's drawing turned off (React and useFrame run,
+// gl.render and gl.clear do nothing), on the same renderer, drawing only the frame asked for. A jump ahead starts
+// again too because the frames between are stepped with the frame asked for's children: going on from the last frame
+// kept the objects its children had mounted (R3F only remakes an object whose `args` changed when a later sibling
+// updates in the same commit), so a frame came out differently after another than alone, as Chrome draws it.
 import { Component, createElement, useContext, useId, useLayoutEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import * as THREE from "three";
 import { _roots, advance, context, createRoot, extend, flushSync, reconciler, type ReconcilerRoot, type RenderProps, type RootState, type RootStore } from "@react-three/fiber";
@@ -146,7 +149,7 @@ function restart(s: Live) {
 
 /** The scene at local frame `frame` (fps a second) drawn, `scene(i)` rendered for each frame stepped */
 function drawTo(s: Live, frame: number, fps: number, scene: (i: number) => ReactNode) {
-  if (frame < s.frame) restart(s);
+  if (frame < s.frame || (s.frame >= 0 && frame > s.frame + 1)) restart(s);
   // the same frame again (a load it waited on came, the page rendered it again): its clock stays, it draws again.
   // Parts that mounted only now (they suspended while the frames were stepped) never ran their useFrame: the scene
   // starts again from frame 0 with them there, once

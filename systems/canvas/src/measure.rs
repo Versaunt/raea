@@ -62,6 +62,34 @@ fn advances_in(opt: &usvg::Options, args: &Value) -> Value {
     })
 }
 
+/// The em box a canvas's textBaseline top, middle and bottom are measured from, as Chrome has it (Blink's
+/// NormalizedTypoAscentAndDescent): the font's first family's OS/2 typo ascender and descender (else its ascent and
+/// descent) scaled to add up to one em. Its (ascent, descent) as fractions of the font size, both positive.
+pub(crate) fn em_box(opt: &usvg::Options, font: &Value) -> Option<(f64, f64)> {
+    let db = &opt.fontdb;
+    let weight = font["weight"].as_str().and_then(|w| w.parse().ok()).unwrap_or(400u16);
+    let style = if font["style"].as_str() == Some("italic") { Style::Italic } else { Style::Normal };
+    let first = font["family"].as_str().unwrap_or("sans-serif").split(',').map(|s| s.trim().trim_matches(['\'', '"']).to_string()).find(|s| !s.is_empty())?;
+    let family = match first.to_lowercase().as_str() {
+        "serif" => Family::Serif,
+        "sans-serif" | "system-ui" => Family::SansSerif,
+        "monospace" => Family::Monospace,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        _ => Family::Name(&first),
+    };
+    let id = db.query(&Query { families: &[family], weight: Weight(weight), style, ..Default::default() })
+        .or_else(|| db.query(&Query { families: &[Family::SansSerif], weight: Weight(weight), style, ..Default::default() }))?;
+    db.with_face_data(id, |data, index| {
+        let f = ttf_parser::Face::parse(data, index).ok()?;
+        let typo = f.typographic_ascender().zip(f.typographic_descender()).map(|(a, d)| (f64::from(a), -f64::from(d)));
+        let (a, d) = typo.filter(|(a, d)| *a > 0.0 && *d >= 0.0).unwrap_or((f64::from(f.ascender()), -f64::from(f.descender())));
+        let h = a + d;
+        (h > 0.0 && a >= 0.0 && a <= h).then(|| (a / h, d / h))
+    })
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
