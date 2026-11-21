@@ -46,9 +46,12 @@ export function pureSession(seed: number, start: number = EPOCH): void {
 
 /** Frame `f` at `fps` is the one being drawn: Math.random starts over from its seed, and the clock is its time. */
 export function pureFrame(f: number, fps: number): void {
+  const was = frame.f;
   frame = { f, fps };
   state = mix(base.seed, f);
   now = base.start + Math.round((f * 1000) / (fps > 0 ? fps : 30));
+  // a new frame told to the Remotion path's requestAnimationFrame (remotion/document.ts), where it's installed
+  if (f !== was && f >= 0) (globalThis as { __raeaFrameTick?: (f: number, fps: number) => void }).__raeaFrameTick?.(f, fps);
 }
 
 /** The frame being drawn starts over: React's next render pass of it (an effect's setState re-rendering part of the tree

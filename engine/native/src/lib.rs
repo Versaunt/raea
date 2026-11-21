@@ -28,6 +28,10 @@ pub const WEB_JS: &str = concat!(
     "})(globalThis);\n"
 );
 
+/// A portable Intl (English only, as Chrome's ICU formats it) for an engine without one: QuickJS. host::install runs it
+/// after web.js on any engine but JavaScriptCore, and it defines nothing where `Intl` exists. Tested in tests/intl.rs.
+pub const INTL_JS: &str = include_str!("intl.js");
+
 thread_local! {
     /// The native calls this thread's context may make (names, or "prefix.*"); None: all. js-exec's contexts are limited.
     pub(crate) static ALLOW: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };

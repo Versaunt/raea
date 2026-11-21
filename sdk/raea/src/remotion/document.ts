@@ -277,11 +277,63 @@ export function installDocument() {
   installWebGLGlobals(g);
   // (no OffscreenCanvas: three makes one only where it's defined)
   g.HTMLCanvasElement ??= HTMLCanvasElement_;
-  // frames come from raea's clock, not a display: a callback runs a task later, given the time
-  if (typeof g.requestAnimationFrame === "undefined") {
-    const now = () => (g.performance as { now(): number } | undefined)?.now() ?? Date.now();
-    g.requestAnimationFrame = (cb: (t: number) => void) => setTimeout(() => cb(now()), 16);
-    g.cancelAnimationFrame = (h: ReturnType<typeof setTimeout>) => clearTimeout(h);
-  }
+  if (typeof g.requestAnimationFrame === "undefined") installFrameCallbacks();
   g.__ui_sync ??= syncByNative;
+}
+
+/** requestAnimationFrame on the composition's frames, not a display's. In Chrome, Remotion's rAF fires at the display
+ *  rate on real time, so what compositions can rely on is "once, before the next paint". Here a callback asked for while
+ *  frame f is being prepared runs once, a task after the request and before f is taken (the request holds the frame
+ *  on raea's frame hold, as delayRender does), given f's time: f / fps * 1000 ms. One asked for inside a callback runs
+ *  on the next frame, so a loop that asks again draws once a frame and never spins. Callbacks run in request order; one
+ *  that throws is reported on the console (as a thrown timer is, with its message) and the rest still run. */
+function installFrameCallbacks() {
+  type Hold = { n: number; wake: Set<() => void> };
+  const HOLD = ((g as { __raeaHold?: Hold }).__raeaHold ??= { n: 0, wake: new Set() });
+  type Cb = (t: number) => void;
+  let seq = 0;
+  let due = new Map<number, Cb>(); // run before the frame being prepared is taken
+  let next = new Map<number, Cb>(); // asked for inside a callback: the next frame's
+  let running = false;
+  let held = false;
+  let frame = { f: -1, fps: 30 };
+  const release = () => {
+    if (!held) return;
+    held = false;
+    HOLD.n = Math.max(0, HOLD.n - 1);
+    if (HOLD.n === 0) for (const w of [...HOLD.wake]) w();
+  };
+  const run = () => {
+    const now = due;
+    due = new Map();
+    const t = (Math.max(0, frame.f) / (frame.fps > 0 ? frame.fps : 30)) * 1000;
+    running = true;
+    for (const cb of now.values()) {
+      try { cb(t); } catch (e) { console.error(`a requestAnimationFrame callback threw: ${e}\n${(e as Error)?.stack ?? ""}`); }
+    }
+    running = false;
+    release();
+  };
+  // the frame held and the callbacks run a task later (after the commit and effects that asked for them)
+  const hold = () => {
+    if (held) return;
+    held = true;
+    HOLD.n++;
+    setTimeout(run, 0);
+  };
+  g.requestAnimationFrame = (cb: Cb): number => {
+    const id = ++seq;
+    if (running) next.set(id, cb);
+    else { due.set(id, cb); hold(); }
+    return id;
+  };
+  g.cancelAnimationFrame = (id: number) => { due.delete(id); next.delete(id); };
+  // a new frame starts being prepared (pure.ts pureFrame, as the entry renders it): last frame's loop callbacks are due
+  g.__raeaFrameTick = (f: number, fps: number) => {
+    frame = { f, fps };
+    if (!next.size) return;
+    due = new Map([...due, ...next].sort((a, b) => a[0] - b[0]));
+    next = new Map();
+    hold();
+  };
 }

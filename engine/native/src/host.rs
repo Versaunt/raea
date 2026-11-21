@@ -3,10 +3,15 @@
 
 use raea_runtime_jsengine::{JsEngine, Ret, arg};
 
-/// `__raea_call` on the engine's global, then the web shims run in it.
+/// `__raea_call` on the engine's global, then the web shims run in it, and on an engine with no Intl (QuickJS, not
+/// JavaScriptCore) the portable one.
 pub fn install(js: &mut dyn JsEngine) -> Result<(), String> {
     js.native("__raea_call", Box::new(raea_call))?;
-    js.eval(crate::WEB_JS, "web.js").map_err(|e| format!("web.js: {e}"))
+    js.eval(crate::WEB_JS, "web.js").map_err(|e| format!("web.js: {e}"))?;
+    if js.name() != "jsc" {
+        js.eval(crate::INTL_JS, "intl.js").map_err(|e| format!("intl.js: {e}"))?;
+    }
+    Ok(())
 }
 
 /// `__raea_call(name, json)`: the call `name` with its JSON arguments, if this thread allows it; its JSON answer.
