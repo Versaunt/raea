@@ -39,6 +39,8 @@ raea-io-assets = { path = "../../io/assets" }
 raea-native = { path = "../../engine/native", default-features = false }
 # the JS engine React runs on (JavaScriptCore on Apple, QuickJS elsewhere)
 raea-runtime-jsengine = { path = "../jsengine" }
+# WebGL 2 on ANGLE for a composition's canvases: `__raea_gl` and the webgl.* calls on this thread
+raea-runtime-webgl = { path = "../webgl" }
 # the one BRP layer (engine/bevy-world): shared.rs reads and writes React's values through it (B3 H4)
 raea-bevy-world = { path = "../../engine/bevy-world" }
 # the same Bevy and feature set as raea-render, so the two share one build

@@ -28,11 +28,18 @@ pub enum Ret {
     Undefined,
     Num(f64),
     Str(String),
+    /// Bytes, an ArrayBuffer in JS.
+    Bytes(Vec<u8>),
 }
 
 /// A native's body: its arguments as passed (each as JS's String(v)) to its value, or Err to throw an Error with that
 /// message.
 pub type Native = Box<dyn Fn(&[String]) -> Result<Ret, String>>;
+
+/// A native that reads bytes: its first argument's bytes where they are (an ArrayBuffer, or a typed array's or
+/// DataView's window of one: no copy, empty for anything else) and its other arguments as numbers (NaN for one that
+/// isn't), to its value, or Err to throw an Error with that message. The bytes are the caller's for the call only.
+pub type NativeBytes = Box<dyn Fn(&[u8], &[f64]) -> Result<Ret, String>>;
 
 thread_local! {
     static T0: std::time::Instant = std::time::Instant::now();
@@ -64,6 +71,8 @@ pub trait JsEngine {
     fn name(&self) -> &'static str;
     /// `name` on the global object, a function backed by `f`.
     fn native(&mut self, name: &str, f: Native) -> Result<(), String>;
+    /// `name` on the global object, a function backed by `f`, which reads its first argument's bytes in place.
+    fn native_bytes(&mut self, name: &str, f: NativeBytes) -> Result<(), String>;
     /// `src` run as a classic script (`file` names it in stack traces); Err is what it threw.
     fn eval(&mut self, src: &str, file: &str) -> Result<(), String>;
     /// The global function `func` called with `args`: its value as a number (NaN when it isn't one), what it threw, or
@@ -213,11 +222,83 @@ mod tests {
         assert!(stopped(&e), "{}: {e}", js.name());
     }
 
+    /// Natives that read bytes in place: an ArrayBuffer, typed arrays and a DataView by their windows, numbers after
+    /// the bytes, bytes back as an ArrayBuffer, an Err thrown; and what 8 MB costs a call.
+    fn bytes(engine: Engine) {
+        let mut js = engine.start().unwrap();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        js.native("note", Box::new(move |a| {
+            s.borrow_mut().push(a.join("|"));
+            Ok(Ret::Undefined)
+        }))
+        .unwrap();
+        // the bytes' sum and length, then the numbers
+        js.native_bytes("sum", Box::new(|b, n| {
+            let total: u64 = b.iter().map(|&x| x as u64).sum();
+            Ok(Ret::Str(format!("{total}/{}/{n:?}", b.len())))
+        }))
+        .unwrap();
+        js.native_bytes("echo", Box::new(|b, n| {
+            let mut v = b.to_vec();
+            v.push(n.first().copied().unwrap_or(0.0) as u8);
+            Ok(Ret::Bytes(v))
+        }))
+        .unwrap();
+        js.native_bytes("refuse", Box::new(|b, _| Err(format!("refused {} bytes", b.len())))).unwrap();
+        js.native("more", Box::new(|_| Ok(Ret::Bytes(vec![7, 8, 9])))).unwrap();
+        js.eval(
+            r#"
+            const ab = new ArrayBuffer(16);
+            const all = new Uint8Array(ab);
+            for (let i = 0; i < 16; i++) all[i] = i + 1;
+            note(sum(new Uint8Array(ab, 4, 3)));            // 5+6+7
+            note(sum(ab, 2, 'x'));                          // 1..16, then numbers
+            note(sum(new DataView(ab, 10, 2)));             // 11+12
+            note(sum(new Float32Array([1, 2]), 0.5));       // 0,0,128,63, 0,0,0,64
+            note(sum([1, 2, 3]), sum(), sum('abc', null));
+            const back = echo(new Uint8Array([3, 4]).subarray(1), 42);
+            note(back instanceof ArrayBuffer, Array.from(new Uint8Array(back)).join(','));
+            const m = more();
+            note(m instanceof ArrayBuffer, m.byteLength, new Uint8Array(m)[2]);
+            try { refuse(new Uint8Array(5)) } catch (e) { note(e instanceof Error, e.message) }
+            "#,
+            "bytes.js",
+        )
+        .unwrap();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [
+                "18/3/[]",
+                "136/16/[2.0, NaN]",
+                "23/2/[]",
+                "255/8/[0.5]",
+                "0/0/[]|0/0/[]|0/0/[NaN]",
+                "true|4,42",
+                "true|3|9",
+                "true|refused 5 bytes",
+            ],
+            "{}",
+            js.name()
+        );
+
+        // 8 MB a call, read in place
+        js.native_bytes("last", Box::new(|b, _| Ok(Ret::Num(b[b.len() - 1] as f64)))).unwrap();
+        js.eval("globalThis.big = new Uint8Array(8 << 20); big[big.length - 1] = 9; function pass(n) { let s = 0; for (let i = 0; i < n; i++) s += last(big, i); return s; }", "big.js").unwrap();
+        let calls = 200;
+        let t = std::time::Instant::now();
+        assert_eq!(js.call("pass", &[Arg::Num(calls as f64)]).unwrap().unwrap(), 9.0 * calls as f64);
+        let per = t.elapsed().as_secs_f64() * 1e3 / calls as f64;
+        println!("{}: 8 MB through native_bytes: {per:.4} ms a call", js.name());
+        assert!(per < 2.0, "{}: {per} ms a call", js.name());
+    }
+
     #[cfg(target_vendor = "apple")]
     #[test]
     fn jsc() {
         same(Engine::Jsc);
         modules(Engine::Jsc);
+        bytes(Engine::Jsc);
     }
 
     #[cfg(any(feature = "portable", not(target_vendor = "apple")))]
@@ -225,5 +306,6 @@ mod tests {
     fn quickjs() {
         same(Engine::QuickJs);
         modules(Engine::QuickJs);
+        bytes(Engine::QuickJs);
     }
 }

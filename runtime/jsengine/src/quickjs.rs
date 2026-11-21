@@ -9,9 +9,9 @@ use rquickjs::function::{Args, Rest};
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::prelude::Coerced;
-use rquickjs::{CatchResultExt, Context, Ctx, Exception, Function, Module, Runtime, Value};
+use rquickjs::{ArrayBuffer, CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime, Value, qjs};
 
-use crate::{Arg, Fetch, JsEngine, Native, Ret};
+use crate::{Arg, Fetch, JsEngine, Native, NativeBytes, Ret};
 
 pub struct Quick {
     rt: Runtime,
@@ -73,16 +73,73 @@ impl Loader for Sources {
     }
 }
 
+/// A native's answer as a JS value: an ArrayBuffer owns its bytes (no copy), an Err is thrown as an Error.
+fn answer<'js>(ctx: Ctx<'js>, r: Result<Ret, String>) -> rquickjs::Result<Value<'js>> {
+    match r {
+        Ok(Ret::Undefined) => Ok(Value::new_undefined(ctx)),
+        Ok(Ret::Num(n)) => Ok(Value::new_float(ctx, n)),
+        Ok(Ret::Str(s)) => Ok(rquickjs::String::from_str(ctx, &s)?.into_value()),
+        Ok(Ret::Bytes(b)) => Ok(ArrayBuffer::new(ctx, b)?.into_value()),
+        Err(e) => Err(Exception::throw_message(&ctx, &e)),
+    }
+}
+
 /// `f` as the global `name`: its arguments coerced to strings, its Ret made a JS value, its Err thrown as an Error.
 fn install<'js>(ctx: &Ctx<'js>, name: &str, f: Native) -> rquickjs::Result<()> {
     let func = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Coerced<String>>| -> rquickjs::Result<Value<'js>> {
         let args: Vec<String> = args.0.into_iter().map(|a| a.0).collect();
-        match f(&args) {
-            Ok(Ret::Undefined) => Ok(Value::new_undefined(ctx)),
-            Ok(Ret::Num(n)) => Ok(Value::new_float(ctx, n)),
-            Ok(Ret::Str(s)) => Ok(rquickjs::String::from_str(ctx, &s)?.into_value()),
-            Err(e) => Err(Exception::throw_message(&ctx, &e)),
+        answer(ctx, f(&args))
+    })?;
+    ctx.globals().set(name, func)
+}
+
+/// The ArrayBuffer behind `v` and the window of it `v` covers: an ArrayBuffer whole, a typed array's or DataView's
+/// bytes; None for anything else (or a detached buffer, or a window outside its buffer).
+fn window<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Option<(ArrayBuffer<'js>, usize, usize)> {
+    if let Some(ab) = ArrayBuffer::from_value(v.clone()) {
+        let len = ab.as_raw()?.len();
+        return Some((ab, 0, len));
+    }
+    let (ab, off, len) = if unsafe { qjs::JS_GetTypedArrayType(v.as_raw()) } >= 0 {
+        let (mut off, mut len): (qjs::size_t, qjs::size_t) = (0, 0);
+        // SAFETY: a typed array of this context; the buffer comes back with its own reference, which the Value owns
+        let buf = unsafe {
+            let b = qjs::JS_GetTypedArrayBuffer(ctx.as_raw().as_ptr(), v.as_raw(), &mut off, &mut len, std::ptr::null_mut());
+            Value::from_raw(ctx.clone(), b)
+        };
+        if buf.is_exception() {
+            // out of bounds after its buffer shrank: QuickJS threw a TypeError, which is dropped (the call gets empty bytes)
+            ctx.catch();
+            return None;
         }
+        (ArrayBuffer::from_value(buf)?, off as usize, len as usize)
+    } else if unsafe { qjs::JS_IsDataView(v.as_raw()) } {
+        let o: &Object = v.as_object()?;
+        let num = |k: &str| o.get::<_, f64>(k).ok().filter(|n| *n >= 0.0).map(|n| n as usize);
+        (o.get::<_, ArrayBuffer>("buffer").ok()?, num("byteOffset")?, num("byteLength")?)
+    } else {
+        return None;
+    };
+    let total = ab.as_raw()?.len();
+    (off.checked_add(len)? <= total).then_some((ab, off, len))
+}
+
+/// `f` as the global `name`: its first argument's bytes read where they are, the rest as numbers.
+fn install_bytes<'js>(ctx: &Ctx<'js>, name: &str, f: NativeBytes) -> rquickjs::Result<()> {
+    let func = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+        let nums: Vec<f64> = args.0.iter().skip(1).map(|v| v.as_number().unwrap_or(f64::NAN)).collect();
+        let held = args.0.first().and_then(|v| window(&ctx, v));
+        // SAFETY: `held` keeps the buffer alive and `f` is Rust, which runs no JS, so nothing can detach or resize it
+        // while the slice lives; the window was checked against the buffer's length
+        let bytes: &[u8] = match &held {
+            Some((ab, off, len)) => match ab.as_raw() {
+                Some(raw) if *len > 0 => unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>().add(*off), *len) },
+                _ => &[],
+            },
+            None => &[],
+        };
+        let r = f(bytes, &nums);
+        answer(ctx, r)
     })?;
     ctx.globals().set(name, func)
 }
@@ -94,6 +151,10 @@ impl JsEngine for Quick {
 
     fn native(&mut self, name: &str, f: Native) -> Result<(), String> {
         self.ctx.with(|ctx| install(&ctx, name, f).map_err(|e| e.to_string()))
+    }
+
+    fn native_bytes(&mut self, name: &str, f: NativeBytes) -> Result<(), String> {
+        self.ctx.with(|ctx| install_bytes(&ctx, name, f).map_err(|e| e.to_string()))
     }
 
     fn eval(&mut self, src: &str, file: &str) -> Result<(), String> {

@@ -76,7 +76,21 @@ unsafe extern "C" {
     fn JSClassCreate(definition: *const ClassDefinition) -> *mut c_void;
     fn JSObjectMake(ctx: Ctx, class: *mut c_void, data: *mut c_void) -> Obj;
     fn JSObjectGetPrivate(obj: Obj) -> *mut c_void;
+    fn JSValueIsNumber(ctx: Ctx, v: Val) -> bool;
+    fn JSValueIsInstanceOfConstructor(ctx: Ctx, v: Val, constructor: Obj, exception: *mut Val) -> bool;
+    // JSValueRef.h and JSTypedArray.h (macOS 10.12, iOS 10)
+    fn JSValueGetTypedArrayType(ctx: Ctx, v: Val, exception: *mut Val) -> u32;
+    fn JSObjectGetTypedArrayBytesPtr(ctx: Ctx, obj: Obj, exception: *mut Val) -> *mut c_void;
+    fn JSObjectGetTypedArrayByteOffset(ctx: Ctx, obj: Obj, exception: *mut Val) -> usize;
+    fn JSObjectGetTypedArrayByteLength(ctx: Ctx, obj: Obj, exception: *mut Val) -> usize;
+    fn JSObjectGetArrayBufferBytesPtr(ctx: Ctx, obj: Obj, exception: *mut Val) -> *mut c_void;
+    fn JSObjectGetArrayBufferByteLength(ctx: Ctx, obj: Obj, exception: *mut Val) -> usize;
+    fn JSObjectMakeArrayBufferWithBytesNoCopy(ctx: Ctx, bytes: *mut c_void, len: usize, deallocator: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>, deallocator_context: *mut c_void, exception: *mut Val) -> Obj;
 }
+
+/// JSTypedArrayType's kJSTypedArrayTypeArrayBuffer and kJSTypedArrayTypeNone; every other value is a typed array.
+const TYPED_ARRAY_BUFFER: u32 = 9;
+const TYPED_NONE: u32 = 10;
 
 fn js_str(s: &str) -> Str {
     // written NUL-terminated (NULs dropped) into a buffer kept per thread (ZeroHeap: a String and a CString a call)
@@ -218,39 +232,174 @@ struct ClassDefinition {
 /// called by `call_native` and dropped by `drop_native` when JavaScriptCore collects the function.
 fn native_class() -> *mut c_void {
     static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CLASS.get_or_init(|| {
-        let def = ClassDefinition {
-            version: 0,
-            attributes: 0,
-            class_name: c"RaeaNative".as_ptr(),
-            parent_class: null_mut(),
-            static_values: std::ptr::null(),
-            static_functions: std::ptr::null(),
-            initialize: std::ptr::null(),
-            finalize: Some(drop_native),
-            has_property: std::ptr::null(),
-            get_property: std::ptr::null(),
-            set_property: std::ptr::null(),
-            delete_property: std::ptr::null(),
-            get_property_names: std::ptr::null(),
-            call_as_function: Some(call_native),
-            call_as_constructor: std::ptr::null(),
-            has_instance: std::ptr::null(),
-            convert_to_type: std::ptr::null(),
+    *CLASS.get_or_init(|| make_class(c"RaeaNative", call_native, drop_native)) as *mut c_void
+}
+
+/// The class of a function backed by a `NativeBytes` closure (`call_native_bytes`, `drop_native_bytes`).
+fn native_bytes_class() -> *mut c_void {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CLASS.get_or_init(|| make_class(c"RaeaNativeBytes", call_native_bytes, drop_native_bytes)) as *mut c_void
+}
+
+/// A function class whose calls go to `call` and whose objects end in `finalize`, as a usize (a OnceLock's value).
+fn make_class(name: &'static std::ffi::CStr, call: Callback, finalize: unsafe extern "C" fn(Obj)) -> usize {
+    let def = ClassDefinition {
+        version: 0,
+        attributes: 0,
+        class_name: name.as_ptr(),
+        parent_class: null_mut(),
+        static_values: std::ptr::null(),
+        static_functions: std::ptr::null(),
+        initialize: std::ptr::null(),
+        finalize: Some(finalize),
+        has_property: std::ptr::null(),
+        get_property: std::ptr::null(),
+        set_property: std::ptr::null(),
+        delete_property: std::ptr::null(),
+        get_property_names: std::ptr::null(),
+        call_as_function: Some(call),
+        call_as_constructor: std::ptr::null(),
+        has_instance: std::ptr::null(),
+        convert_to_type: std::ptr::null(),
+    };
+    unsafe { JSClassCreate(&def) as usize }
+}
+
+/// A native's answer as a JS value: an ArrayBuffer over the bytes themselves (freed by `free_bytes` when collected),
+/// an Err thrown as an Error.
+///
+/// # Safety
+/// `exception` must be the callback's.
+unsafe fn answer(ctx: Ctx, exception: *mut Val, r: Result<crate::Ret, String>) -> Val {
+    unsafe {
+        match r {
+            Ok(crate::Ret::Undefined) => undefined(ctx),
+            Ok(crate::Ret::Num(n)) => number(ctx, n),
+            Ok(crate::Ret::Str(s)) => string(ctx, &s),
+            Ok(crate::Ret::Bytes(b)) => {
+                let b = Box::into_raw(b.into_boxed_slice());
+                let len = b.len();
+                let mut exc: Val = std::ptr::null();
+                let buf = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, b as *mut u8 as *mut c_void, len, Some(free_bytes), len as *mut c_void, &mut exc);
+                if !exc.is_null() || buf.is_null() {
+                    // not made: the bytes are still ours
+                    drop(Box::from_raw(b));
+                    if !exception.is_null() {
+                        *exception = exc;
+                    }
+                    return undefined(ctx);
+                }
+                buf as Val
+            }
+            Err(e) => throw(ctx, exception, &e),
+        }
+    }
+}
+
+/// An ArrayBuffer's bytes from `answer` freed (its deallocator context is their length).
+unsafe extern "C" fn free_bytes(bytes: *mut c_void, len: *mut c_void) {
+    unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(bytes as *mut u8, len as usize))) }
+}
+
+/// Property `name` of `obj`, None when getting it threw.
+unsafe fn get(ctx: Ctx, obj: Obj, name: &str) -> Option<Val> {
+    unsafe {
+        let n = js_str(name);
+        let mut exc: Val = std::ptr::null();
+        let v = JSObjectGetProperty(ctx, obj, n, &mut exc);
+        JSStringRelease(n);
+        (exc.is_null() && !v.is_null()).then_some(v)
+    }
+}
+
+/// The bytes `v` covers, where they are: an ArrayBuffer whole, a typed array's or DataView's window of its buffer;
+/// empty for anything else. JavaScriptCore pins a buffer whose bytes the API hands out (it can't be transferred after).
+///
+/// # Safety
+/// `v` must belong to `ctx` and stay alive (a callback's argument does) with no JS run while the slice is used.
+unsafe fn bytes_of<'a>(ctx: Ctx, v: Val) -> &'a [u8] {
+    unsafe {
+        let mut exc: Val = std::ptr::null();
+        let o = v as Obj;
+        let (ptr, off, len) = match JSValueGetTypedArrayType(ctx, v, &mut exc) {
+            _ if !exc.is_null() => return &[],
+            TYPED_ARRAY_BUFFER => (JSObjectGetArrayBufferBytesPtr(ctx, o, &mut exc), 0, JSObjectGetArrayBufferByteLength(ctx, o, &mut exc)),
+            TYPED_NONE => match data_view(ctx, v) {
+                Some(w) => w,
+                None => return &[],
+            },
+            // the bytes pointer is the buffer's start, not the view's
+            _ => (JSObjectGetTypedArrayBytesPtr(ctx, o, &mut exc), JSObjectGetTypedArrayByteOffset(ctx, o, &mut exc), JSObjectGetTypedArrayByteLength(ctx, o, &mut exc)),
         };
-        unsafe { JSClassCreate(&def) as usize }
-    }) as *mut c_void
+        if !exc.is_null() || ptr.is_null() || len == 0 {
+            return &[];
+        }
+        std::slice::from_raw_parts((ptr as *const u8).add(off), len)
+    }
+}
+
+/// A DataView's buffer bytes, offset and length (the C API has no DataView calls: its own getters are read, then
+/// checked against the buffer), None for anything that isn't one.
+unsafe fn data_view(ctx: Ctx, v: Val) -> Option<(*mut c_void, usize, usize)> {
+    unsafe {
+        if !JSValueIsObject(ctx, v) {
+            return None;
+        }
+        let o = v as Obj;
+        let ctor = get(ctx, JSContextGetGlobalObject(ctx), "DataView")?;
+        if !JSValueIsObject(ctx, ctor) || !JSValueIsInstanceOfConstructor(ctx, v, ctor as Obj, null_mut()) {
+            return None;
+        }
+        let buf = get(ctx, o, "buffer")?;
+        if JSValueGetTypedArrayType(ctx, buf, null_mut()) != TYPED_ARRAY_BUFFER {
+            return None;
+        }
+        let num = |k: &str| -> Option<usize> {
+            let n = get(ctx, o, k)?;
+            if !JSValueIsNumber(ctx, n) {
+                return None;
+            }
+            let n = JSValueToNumber(ctx, n, null_mut());
+            (n >= 0.0).then_some(n as usize)
+        };
+        let (off, len) = (num("byteOffset")?, num("byteLength")?);
+        let mut exc: Val = std::ptr::null();
+        let total = JSObjectGetArrayBufferByteLength(ctx, buf as Obj, &mut exc);
+        if !exc.is_null() || off.checked_add(len)? > total {
+            return None;
+        }
+        Some((JSObjectGetArrayBufferBytesPtr(ctx, buf as Obj, null_mut()), off, len))
+    }
 }
 
 unsafe extern "C" fn call_native(ctx: Ctx, function: Obj, _this: Obj, argc: usize, argv: *const Val, exception: *mut Val) -> Val {
     unsafe {
         let f = &*(JSObjectGetPrivate(function) as *const crate::Native);
         let args: Vec<String> = (0..argc).map(|i| to_string(ctx, *argv.add(i))).collect();
-        match f(&args) {
-            Ok(crate::Ret::Undefined) => undefined(ctx),
-            Ok(crate::Ret::Num(n)) => number(ctx, n),
-            Ok(crate::Ret::Str(s)) => string(ctx, &s),
-            Err(e) => throw(ctx, exception, &e),
+        answer(ctx, exception, f(&args))
+    }
+}
+
+unsafe extern "C" fn call_native_bytes(ctx: Ctx, function: Obj, _this: Obj, argc: usize, argv: *const Val, exception: *mut Val) -> Val {
+    unsafe {
+        let f = &*(JSObjectGetPrivate(function) as *const crate::NativeBytes);
+        let nums: Vec<f64> = (1..argc)
+            .map(|i| {
+                let v = *argv.add(i);
+                if JSValueIsNumber(ctx, v) { JSValueToNumber(ctx, v, null_mut()) } else { f64::NAN }
+            })
+            .collect();
+        let bytes = if argc > 0 { bytes_of(ctx, *argv) } else { &[] };
+        let r = f(bytes, &nums);
+        answer(ctx, exception, r)
+    }
+}
+
+unsafe extern "C" fn drop_native_bytes(obj: Obj) {
+    unsafe {
+        let p = JSObjectGetPrivate(obj) as *mut crate::NativeBytes;
+        if !p.is_null() {
+            drop(Box::from_raw(p));
         }
     }
 }
@@ -312,6 +461,17 @@ impl Context {
         unsafe {
             let n = js_str(name);
             let func = JSObjectMake(self.c(), native_class(), Box::into_raw(Box::new(f)) as *mut c_void);
+            JSObjectSetProperty(self.c(), JSContextGetGlobalObject(self.c()), n, func as Val, 0, null_mut());
+            JSStringRelease(n);
+        }
+    }
+
+    /// `name` on the global object, a function backed by the closure `f`, which reads its first argument's bytes in
+    /// place (kept until the function is collected).
+    pub fn set_native_bytes(&self, name: &str, f: crate::NativeBytes) {
+        unsafe {
+            let n = js_str(name);
+            let func = JSObjectMake(self.c(), native_bytes_class(), Box::into_raw(Box::new(f)) as *mut c_void);
             JSObjectSetProperty(self.c(), JSContextGetGlobalObject(self.c()), n, func as Val, 0, null_mut());
             JSStringRelease(n);
         }

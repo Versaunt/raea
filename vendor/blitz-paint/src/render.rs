@@ -1565,7 +1565,8 @@ fn to_peniko_image(image: &RasterImageData, quality: peniko::ImageQuality) -> pe
             format: peniko::ImageFormat::Rgba8,
             width: image.width,
             height: image.height,
-            alpha_type: peniko::ImageAlphaType::Alpha,
+            // raea: a WebGL canvas's frame is premultiplied (RasterImageData::new_premultiplied)
+            alpha_type: if image.premultiplied() { peniko::ImageAlphaType::AlphaPremultiplied } else { peniko::ImageAlphaType::Alpha },
         },
         sampler: ImageSampler {
             x_extend: peniko::Extend::Repeat,

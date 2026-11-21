@@ -864,7 +864,25 @@ impl RasterImageData {
             data: Blob::new(data),
         }
     }
+
+    /// raea: an image whose color is already multiplied by its alpha (a WebGL canvas's drawing buffer, which Chrome
+    /// composites as it is: color where alpha is 0, an additive glow, stays). Marked by its blob, so the struct and
+    /// its other makers stay as they are; the rest are straight alpha.
+    pub fn new_premultiplied(width: u32, height: u32, data: Blob<u8>) -> Self {
+        let mut marked = PREMULTIPLIED.lock().unwrap();
+        marked.retain(|w| w.upgrade().is_some());
+        marked.push(data.downgrade());
+        Self { width, height, data }
+    }
+
+    /// raea: whether its color is already multiplied by its alpha (`new_premultiplied`)
+    pub fn premultiplied(&self) -> bool {
+        PREMULTIPLIED.lock().unwrap().iter().any(|w| w.id() == self.data.id())
+    }
 }
+
+/// raea: the blobs of the premultiplied raster images still alive
+static PREMULTIPLIED: std::sync::Mutex<Vec<linebender_resource_handle::WeakBlob<u8>>> = std::sync::Mutex::new(Vec::new());
 
 #[derive(Debug, Clone)]
 pub enum ImageData {

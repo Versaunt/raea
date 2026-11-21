@@ -1,0 +1,24 @@
+[package]
+name = "raea-runtime-webgl"
+version = "0.1.0"
+edition = "2024"
+license = "FSL-1.1-ALv2"
+publish = false
+description = "WebGL 2 for a page's canvases: the context's calls run on ANGLE (Google's GL ES, as in Chrome), its pixels handed to the page"
+
+[dependencies]
+# the native that takes the command bytes
+raea-runtime-jsengine = { path = "../jsengine" }
+# the webgl.* calls
+raea-native = { path = "../../engine/native", default-features = false }
+# a 2D canvas as a texture source, and where finished frames wait for the page
+raea-sys-canvas = { path = "../../systems/canvas" }
+# an image texture source decoded (as raea-sys-canvas decodes one, with the formats raea-runtime-react's bevy reads),
+# read from a data: URL or raea's URL cache
+bevy = { version = "=0.20.0", default-features = false, features = ["std", "bevy_render", "bevy_image", "png", "jpeg", "webp", "gif"] }
+raea-io-net = { path = "../../io/net" }
+serde_json = "1"
+# GL ES through ANGLE's libGLESv2, EGL through its libEGL (the versions wgpu already brings)
+glow = "0.17"
+khronos-egl = { version = "6", features = ["dynamic"] }
+libloading = "0.8"

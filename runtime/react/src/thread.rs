@@ -76,6 +76,11 @@ pub(crate) fn js_thread(bundle: PathBuf, tx: Sender<Batch>, events: Receiver<Str
         error!("raea-runtime-react: {e}");
         return;
     }
+    // WebGL contexts are bound to the thread that made them: this one, where the composition's canvases run
+    if let Err(e) = raea_runtime_webgl::install(&mut *ctx) {
+        error!("raea-runtime-react: webgl: {e}");
+        return;
+    }
     if let Err(e) = ctx.eval(&code, "bundle.js") {
         // printed plainly as well: this thread can start before Bevy's log subscriber exists, which drops the line
         eprintln!("[js] bundle.js threw before its first commit: {e}");

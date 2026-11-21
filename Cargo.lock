@@ -15052,6 +15052,7 @@ dependencies = [
  "raea-runtime-shared",
  "raea-runtime-twins",
  "raea-runtime-view",
+ "raea-runtime-webgl",
  "raea-sys-animate",
  "raea-sys-bake",
  "raea-sys-contact",
@@ -15168,6 +15169,21 @@ dependencies = [
  "raea-sys-k",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "raea-runtime-webgl"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glow",
+ "khronos-egl",
+ "libloading",
+ "raea-io-net",
+ "raea-native",
+ "raea-runtime-jsengine",
+ "raea-sys-canvas",
+ "serde_json",
 ]
 
 [[package]]

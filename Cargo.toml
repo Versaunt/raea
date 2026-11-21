@@ -35,6 +35,7 @@ members = [
     "engine/bevy-plugins",
     "runtime/js",
     "runtime/jsengine",
+    "runtime/webgl",
     "engine/bevy-world",
     "engine/bundle",
     "engine/cli",

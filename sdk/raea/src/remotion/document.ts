@@ -3,9 +3,13 @@
 // sdk/ui: its pixels and text drawn by the host, systems/canvas), so text is measured, pictures are made and read back
 // (measureText, getImageData, toDataURL) as in Chrome; `document.fonts` and `FontFace`, whose faces go to the page as
 // @font-face would give them (`fonts.face`); and a head and body that take what's appended. Installed once, only where
-// there's no document: a host that has one (raea app's DOM mode) keeps its own. `new Image()` reads its file through raea. No createElementNS: three.js's image
-// loading stays raea's R3F reader's (sdk/r3f texture.ts stands in for it when there's no createElementNS).
+// there's no document: a host that has one (raea app's DOM mode) keeps its own. `new Image()` reads its file through raea.
+// A canvas's getContext("webgl2") is raea's WebGL 2 (sdk/raea/src/webgl), drawn off the page: nothing shows it, so it
+// never snapshots; toDataURL and drawImage read its drawing buffer when asked. createElementNS is createElement (three
+// makes its canvases and images with it).
 import { CanvasRenderingContext2D_, Path2D_, ImageData_ } from "../../ui/canvas";
+import { base64, encodePng } from "../../ui/canvas/png";
+import { WebGL2RenderingContext_, installWebGLGlobals } from "../webgl";
 import { addFontFace } from "./face";
 
 const g = globalThis as Record<string, unknown> & { __raea_call?: (n: string, a: string) => string | undefined };
@@ -20,7 +24,7 @@ function syncByNative(name: string, json: string): string {
   }
 }
 
-class Style {
+export class Style {
   [k: string]: unknown;
   setProperty(k: string, v: string) { this[k] = v; }
   getPropertyValue(k: string) { return String(this[k] ?? ""); }
@@ -48,12 +52,22 @@ class OffElement {
   removeChild<T extends OffElement>(c: T): T { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; }
   insertBefore<T extends OffElement>(c: T): T { return this.appendChild(c); }
   remove() { this.parentNode?.removeChild(this); }
-  addEventListener() {}
-  removeEventListener() {}
-  /** an event's `on<type>` handler called (`new Image()`'s load and error) */
+  private listeners?: Map<string, Set<(e: unknown) => void>>;
+  addEventListener(type: string, fn: (e: unknown) => void) {
+    if (typeof fn !== "function") return;
+    const all = (this.listeners ??= new Map());
+    if (!all.has(type)) all.set(type, new Set());
+    all.get(type)!.add(fn);
+  }
+  removeEventListener(type: string, fn: (e: unknown) => void) { this.listeners?.get(type)?.delete(fn); }
+  /** an event's `on<type>` handler and listeners called (`new Image()`'s load and error, which three's ImageLoader
+   *  listens for) */
   dispatchEvent(e?: { type?: string }) {
-    const h = e?.type ? (this as unknown as Record<string, unknown>)["on" + e.type] : undefined;
-    if (typeof h === "function") h.call(this, Object.assign(Object.create(null), { type: e!.type, target: this, currentTarget: this }));
+    if (!e?.type) return true;
+    const ev = Object.assign(Object.create(null), { type: e.type, target: this, currentTarget: this });
+    const h = (this as unknown as Record<string, unknown>)["on" + e.type];
+    if (typeof h === "function") h.call(this, ev);
+    for (const fn of [...(this.listeners?.get(e.type) ?? [])]) fn.call(this, ev);
     return true;
   }
   get innerText() { return this.textContent; }
@@ -80,20 +94,50 @@ class OffElement {
   getElementsByTagName() { return []; }
 }
 
-/** A canvas off the page: its bitmap is width x height (300 x 150 unless set), drawn by raea's Canvas 2D. */
+/** What marks a canvas element, off the page (OffCanvas) or on it (bevy-react's BevyCanvasElement, canvas.ts):
+ *  `x instanceof HTMLCanvasElement` asks it. */
+export const CANVAS = Symbol.for("raea.canvas");
+
+/** A WebGL canvas's drawing buffer as a PNG data URL (toDataURL, and drawImage with it as the source). */
+export function glDataUrl(gl: WebGL2RenderingContext_, w: number, h: number): string {
+  if (!w || !h) return "data:,";
+  return `data:image/png;base64,${base64(encodePng(w, h, gl._readCanvas()))}`;
+}
+
+/** A canvas off the page: its bitmap is width x height (300 x 150 unless set), drawn by raea's Canvas 2D or WebGL 2. */
 class OffCanvas extends OffElement {
   _ctx?: CanvasRenderingContext2D_;
+  __gl?: WebGL2RenderingContext_;
   constructor() { super("canvas"); }
   get width(): number { const v = parseInt(this.getAttribute("width") ?? "", 10); return Number.isFinite(v) && v >= 0 ? v : 300; }
-  set width(v: number) { this.setAttribute("width", String(Math.max(0, Math.floor(v)))); this._ctx?._reset(); }
+  set width(v: number) { const was = this.width; this.setAttribute("width", String(Math.max(0, Math.floor(v)))); this._ctx?._reset(); this.resized(was, this.height); }
   get height(): number { const v = parseInt(this.getAttribute("height") ?? "", 10); return Number.isFinite(v) && v >= 0 ? v : 150; }
-  set height(v: number) { this.setAttribute("height", String(Math.max(0, Math.floor(v)))); this._ctx?._reset(); }
-  getContext(kind: string) {
-    if (kind !== "2d") return null;
+  set height(v: number) { const was = this.height; this.setAttribute("height", String(Math.max(0, Math.floor(v)))); this._ctx?._reset(); this.resized(this.width, was); }
+  /** the WebGL drawing buffer remade at the new size (not when the size is the same) */
+  private resized(w: number, h: number) { if (this.__gl && (w !== this.width || h !== this.height)) this.__gl._resize(this.width, this.height); }
+  get clientWidth() { return this.width; }
+  get clientHeight() { return this.height; }
+  getContext(kind: string, attrs?: Record<string, unknown>) {
+    // a canvas has one kind of context, as in a browser: asked for the other kind, it answers null. No WebGL 1: three
+    // r178 is WebGL 2 only, and matching Chrome's WebGL 1 isn't a goal
+    if (kind === "webgl2") return this._ctx ? null : (this.__gl ??= new WebGL2RenderingContext_(this, this, attrs));
+    if (kind !== "2d" || this.__gl) return null;
     return (this._ctx ??= new CanvasRenderingContext2D_(this as never));
   }
-  toDataURL() { return (this.getContext("2d") as CanvasRenderingContext2D_)._dataUrl(); }
+  /** (the WebGL host's: off the page nothing shows a frame) */
+  _gldrawn() {}
+  // (always PNG, whatever type is asked)
+  toDataURL() { return this.__gl ? glDataUrl(this.__gl, this.width, this.height) : (this.getContext("2d") as CanvasRenderingContext2D_)._dataUrl(); }
+  /** a WebGL canvas drawn onto a 2D canvas (drawImage draws a source's currentSrc): its pixels as a PNG data URL */
+  get currentSrc() { return this.__gl ? this.toDataURL() : ""; }
   toBlob(cb: (b: unknown) => void) { cb(null); }
+  getBoundingClientRect() { const [width, height] = [this.width, this.height]; return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON() { return this; } }; }
+}
+(OffCanvas.prototype as unknown as Record<symbol, boolean>)[CANVAS] = true;
+
+/** HTMLCanvasElement for `instanceof` (three.js asks it of a texture's image): true of a canvas on or off the page. */
+class HTMLCanvasElement_ {
+  static [Symbol.hasInstance](x: unknown) { return !!x && !!(x as Record<symbol, unknown>)[CANVAS]; }
 }
 
 /** `new Image()`: an img nobody puts on the page */
@@ -190,6 +234,8 @@ const fonts = {
   [Symbol.iterator]() { return faces.values(); },
 };
 
+const createElement = (tag: string) => { const t = String(tag).toLowerCase(); return t === "canvas" ? new OffCanvas() : t === "img" ? new ImageOff() : new OffElement(String(tag)); };
+
 export function installDocument() {
   if (typeof g.document !== "undefined") return;
   const head = new OffElement("head");
@@ -202,7 +248,8 @@ export function installDocument() {
     body,
     documentElement: html,
     fonts,
-    createElement: (tag: string) => { const t = String(tag).toLowerCase(); return t === "canvas" ? new OffCanvas() : t === "img" ? new ImageOff() : new OffElement(String(tag)); },
+    createElement,
+    createElementNS: (_ns: string, tag: string) => createElement(tag),
     createTextNode: (text: string) => Object.assign(new OffElement("#text"), { textContent: text }),
     getElementById: () => null,
     querySelector: () => null,
@@ -227,5 +274,14 @@ export function installDocument() {
   g.Path2D ??= Path2D_;
   g.ImageData ??= ImageData_;
   g.CanvasRenderingContext2D ??= CanvasRenderingContext2D_;
+  installWebGLGlobals(g);
+  // (no OffscreenCanvas: three makes one only where it's defined)
+  g.HTMLCanvasElement ??= HTMLCanvasElement_;
+  // frames come from raea's clock, not a display: a callback runs a task later, given the time
+  if (typeof g.requestAnimationFrame === "undefined") {
+    const now = () => (g.performance as { now(): number } | undefined)?.now() ?? Date.now();
+    g.requestAnimationFrame = (cb: (t: number) => void) => setTimeout(() => cb(now()), 16);
+    g.cancelAnimationFrame = (h: ReturnType<typeof setTimeout>) => clearTimeout(h);
+  }
   g.__ui_sync ??= syncByNative;
 }

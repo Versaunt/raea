@@ -3,7 +3,7 @@
 //! between frames for JavaScriptCore's GC timers.
 
 use super::{Context, modules::Modules, pump};
-use crate::{Arg, Fetch, JsEngine, Native};
+use crate::{Arg, Fetch, JsEngine, Native, NativeBytes};
 
 pub struct Jsc {
     ctx: Context,
@@ -30,6 +30,11 @@ impl JsEngine for Jsc {
 
     fn native(&mut self, name: &str, f: Native) -> Result<(), String> {
         self.ctx.set_native(name, f);
+        Ok(())
+    }
+
+    fn native_bytes(&mut self, name: &str, f: NativeBytes) -> Result<(), String> {
+        self.ctx.set_native_bytes(name, f);
         Ok(())
     }
 

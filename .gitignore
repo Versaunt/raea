@@ -103,3 +103,6 @@ sdk/raea/.scratch-*/
 .tripo/
 # tools/bevy-parity links each example folder's assets/ to Bevy's checkout at run time (an absolute, per-machine path)
 /sdk/raea/bench/bevy-parity/**/assets
+
+# ANGLE for WebGL, fetched by scripts/fetch-angle.sh
+vendor/angle/

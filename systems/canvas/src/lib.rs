@@ -29,6 +29,7 @@ mod draw;
 mod measure;
 pub use measure::advances;
 mod filter;
+pub mod frames;
 mod paint;
 mod subsets;
 pub mod svg;
@@ -94,10 +95,9 @@ pub fn fonts(now: fn() -> std::sync::Arc<usvg::fontdb::Database>) {
     let _ = FONT_SOURCE.set(now);
 }
 
-/// `canvas.read` {width, height, __canvas2d, x, y, w, h} -> {data: base64 RGBA}: the canvas's list drawn on a bitmap of
-/// its own and the rectangle read off it, outside the bitmap transparent black (getImageData's answer).
-pub fn read(args: &Value) -> Result<Value, String> {
-    use base64::Engine as _;
+/// A canvas's list {uid, width, height, __canvas2d} drawn on a bitmap of its own: its size and RGBA8, not premultiplied
+/// (`canvas.read`, and a 2D canvas uploaded as a WebGL texture).
+pub fn pixels(args: &Value) -> Result<(u32, u32, Vec<u8>), String> {
     let props = args.as_object().ok_or("no canvas")?;
     let opt = page_options();
     // a canvas read again (its uid) is drawn on from where its last read left off, when it's the same list and size: a
@@ -109,7 +109,7 @@ pub fn read(args: &Value) -> Result<Value, String> {
         kept.iter().position(|(k, _)| *k == u).map(|i| kept.remove(i).1)
     });
     let replay = Replay::update(old, props, &opt);
-    let (bw, bh, px) = replay.rgba();
+    let out = replay.rgba();
     if let Some(u) = uid {
         let mut kept = KEPT.lock().unwrap();
         kept.push((u, replay));
@@ -118,6 +118,14 @@ pub fn read(args: &Value) -> Result<Value, String> {
             kept.remove(0);
         }
     }
+    Ok(out)
+}
+
+/// `canvas.read` {width, height, __canvas2d, x, y, w, h} -> {data: base64 RGBA}: the canvas's list drawn on a bitmap of
+/// its own and the rectangle read off it, outside the bitmap transparent black (getImageData's answer).
+pub fn read(args: &Value) -> Result<Value, String> {
+    use base64::Engine as _;
+    let (bw, bh, px) = pixels(args)?;
     let n = |k: &str| args[k].as_f64().unwrap_or(0.0) as i64;
     let (x, y, w, h) = (n("x"), n("y"), n("w").max(0), n("h").max(0));
     if w * h > 1 << 28 {
@@ -170,7 +178,7 @@ pub fn natural_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
     Some((img.width(), img.height()))
 }
 
-pub(crate) fn page_options() -> usvg::Options<'static> {
+pub fn page_options() -> usvg::Options<'static> {
     let db = FONT_SOURCE.get().map(|now| now()).or_else(|| FONTS.lock().unwrap().clone());
     db.map_or_else(usvg::Options::default, |db| page_fonts(&db))
 }

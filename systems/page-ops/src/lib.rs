@@ -73,7 +73,7 @@ impl Nodes {
 /// The ops applied in order. Ids the ops name that the document doesn't have are skipped, as raea-runtime-js's host does.
 pub fn apply(doc: &mut BaseDocument, nodes: &mut Nodes, ops: Vec<Op>) {
     let mut styles = Vec::new();
-    // canvases whose list or size changed
+    // canvases whose list, WebGL frame or size changed
     let mut canvases = Vec::new();
     // a created element with autofocus, focused once it's in (as raea-runtime-js's host does, and Chrome on insertion)
     let mut autofocus = None;
@@ -240,7 +240,7 @@ pub fn apply(doc: &mut BaseDocument, nodes: &mut Nodes, ops: Vec<Op>) {
                     let kept = nodes.props.entry(id).or_default();
                     for key in unset.iter().flatten() { kept.remove(key); }
                     kept.extend(set.iter().flatten().map(|(k, v)| (k.clone(), v.clone())));
-                    if kind == "canvas" && set.iter().flatten().any(|(k, _)| matches!(k.as_str(), "__canvas2d" | "width" | "height")) {
+                    if kind == "canvas" && set.iter().flatten().any(|(k, _)| matches!(k.as_str(), "__canvas2d" | "__webgl" | "width" | "height")) {
                         canvases.push(id);
                     }
                     if let Some(set) = &set {
@@ -317,13 +317,22 @@ pub fn apply(doc: &mut BaseDocument, nodes: &mut Nodes, ops: Vec<Op>) {
     let fonts = (!canvases.is_empty()).then(|| raea_sys_canvas::page_fonts(&blitz_dom::util::svg_fonts()));
     for id in canvases {
         let (Some(props), Some(n)) = (nodes.props.get(&id), nodes.by_id.get(&id).copied()) else { continue };
-        let r = raea_sys_canvas::Replay::update(nodes.canvases.remove(&id), props, fonts.as_ref().unwrap());
-        let (w, h, px) = r.rgba();
-        nodes.canvases.insert(id, r);
+        let image = if let Some(gl) = props.get("__webgl") {
+            // a WebGL canvas: the frame its `__webgl` names (runtime/webgl's snapshot, PROTOCOL.md); one already taken
+            // or not there keeps the picture it has
+            let (Some(ctx), Some(generation)) = (gl["ctx"].as_u64(), gl["gen"].as_u64()) else { continue };
+            let Some(f) = raea_sys_canvas::frames::take(ctx as u32, generation) else { continue };
+            let data = vello::peniko::Blob::new(std::sync::Arc::new(f.data));
+            if f.premultiplied { blitz_dom::node::RasterImageData::new_premultiplied(f.width, f.height, data) } else { blitz_dom::node::RasterImageData { width: f.width, height: f.height, data } }
+        } else {
+            let r = raea_sys_canvas::Replay::update(nodes.canvases.remove(&id), props, fonts.as_ref().unwrap());
+            let (w, h, px) = r.rgba();
+            nodes.canvases.insert(id, r);
+            blitz_dom::node::RasterImageData { width: w, height: h, data: vello::peniko::Blob::new(std::sync::Arc::new(px)) }
+        };
         let Some(node) = doc.get_node_mut(n) else { continue };
         let Some(el) = node.element_data_mut() else { continue };
-        let data = vello::peniko::Blob::new(std::sync::Arc::new(px));
-        el.special_data = blitz_dom::node::SpecialElementData::Image(Box::new(blitz_dom::node::ImageData::Raster(blitz_dom::node::RasterImageData { width: w, height: h, data })));
+        el.special_data = blitz_dom::node::SpecialElementData::Image(Box::new(blitz_dom::node::ImageData::Raster(image)));
         node.clear_layout_cache();
         node.insert_damage(ALL_DAMAGE);
         node.mark_ancestors_dirty();

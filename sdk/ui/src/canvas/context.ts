@@ -479,6 +479,14 @@ export class CanvasRenderingContext2D_ {
     if (r) unb64(r.data, out.data);
     return out;
   }
+  /** This canvas as a WebGL texture source (runtime/webgl source.rs, kind 2): the args canvas.read takes, without
+   *  the rectangle, as JSON. */
+  _source(): string {
+    const [w, h] = [this.canvas.width, this.canvas.height];
+    const gen = w !== this.size[0] || h !== this.size[1] ? this.gen + 1 : this.gen;
+    const ops = gen === this.gen ? this.list : [];
+    return JSON.stringify({ uid: this.uid, width: w, height: h, __canvas2d: { gen, w, h, ops } });
+  }
   createImageData(a: number | ImageData_, h?: number) {
     if (a instanceof ImageData_) return new ImageData_(a.width, a.height);
     return new ImageData_(Math.abs(Math.trunc(a)), Math.abs(Math.trunc(Number(h))));
